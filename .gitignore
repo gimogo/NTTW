@@ -1,0 +1,31 @@
+# deps / build
+node_modules/
+.next/
+out/
+build/
+
+# hardhat
+cache/
+artifacts/
+typechain-types/
+coverage/
+coverage.json
+
+# env
+.env
+.env.local
+.env*.local
+
+# misc
+*.log
+.DS_Store
+tsconfig.tsbuildinfo
+
+# install caches (host-local, never commit)
+npmcache/
+.pnpm-store/
+
+# session / editor artifacts
+freebuff-chat-*.md
+.~lock.*#
+persist*.txt
