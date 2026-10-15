@@ -18,7 +18,7 @@ export const retroNotesAbi = [
   {
     type: "function",
     name: "stampNote",
-    stateMutability: "payable",
+    stateMutability: "nonpayable",
     inputs: [
       { name: "_content", type: "string" },
       { name: "_color", type: "string" },
@@ -126,28 +126,36 @@ export const retroNotesAbi = [
     name: "NoteNotFound",
     inputs: [{ name: "id", type: "uint256" }],
   },
+  { type: "error", name: "TokenTransferFailed", inputs: [] },
   {
     type: "error",
-    name: "IncorrectEthFee",
-    inputs: [
-      { name: "sent", type: "uint256" },
-      { name: "required", type: "uint256" },
-    ],
+    name: "RewardTransferFailed",
+    inputs: [{ name: "winner", type: "address" }],
   },
-  { type: "error", name: "EthTransferFailed", inputs: [] },
-  { type: "error", name: "TokenTransferFailed", inputs: [] },
 ] as const;
 
 /**
  * Payment constants for `stampNote` — keep in sync with
- * contracts/IMDRetroWall.sol (TOKEN_FEE, ETH_FEE).
+ * contracts/IMDRetroWall.sol (TOKEN_FEE, TOKEN_FEE_BURN_SHARE,
+ * TOKEN_FEE_POOL_SHARE). The stamp fee is token-only (no ETH).
  */
-export const PAYMENT_TOKEN_ADDRESS =
-  "0xFF0C532FDB8Cd566Ae169C1CB157ff2Bdc83E105" as const;
-/** 0.02 FRNPET (18 decimals) in base units. */
-export const TOKEN_FEE = 20_000_000_000_000_000n; // 0.02e18
-/** 0.00005 ETH in wei. */
-export const ETH_FEE = 50_000_000_000_000n; // 5e13
+/**
+ * Payment-token address from env. The wall takes the token address in its
+ * constructor, so after deploying it must be mirrored here:
+ *   NEXT_PUBLIC_PAYMENT_TOKEN_ADDRESS=0x...
+ * in .env.local. Without it the approve/stamp flow is disabled.
+ */
+export function getPaymentTokenAddress(): `0x${string}` | undefined {
+  const raw = process.env.NEXT_PUBLIC_PAYMENT_TOKEN_ADDRESS;
+  if (!raw || !/^0x[0-9a-fA-F]{40}$/.test(raw)) return undefined;
+  return raw as `0x${string}`;
+}
+/** 1000 tokens (18 decimals) in base units — the full stamp fee. */
+export const TOKEN_FEE = 1_000_000_000_000_000_000_000n; // 1000e18
+/** 50% of the fee — burned to the dead address. */
+export const TOKEN_FEE_BURN_SHARE = 500_000_000_000_000_000_000n; // 500e18
+/** 50% of the fee — accrued into the weekly reward pool. */
+export const TOKEN_FEE_POOL_SHARE = 500_000_000_000_000_000_000n; // 500e18
 /** Unlimited approval sentinel (type(uint256).max) — approve once, stamp freely. */
 export const MAX_UINT256 = 2n ** 256n - 1n;
 

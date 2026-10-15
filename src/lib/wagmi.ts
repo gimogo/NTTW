@@ -1,10 +1,10 @@
 import { createConfig, http, type CreateConnectorFn } from "wagmi";
-import { base, baseSepolia } from "wagmi/chains";
+import { baseSepolia, robinhood } from "wagmi/chains";
 import { injected } from "wagmi/connectors";
 
 /**
- * Network support is intentionally limited to Base (mainnet) and Base Sepolia
- * (testnet) for the IMD Protocol Hackathon build.
+ * Network support is intentionally limited to Robinhood Chain (mainnet) and
+ * Base Sepolia (testnet).
  *
  * WalletConnect is optional: the connector (and its QR-modal dependency chain,
  * `@walletconnect/ethereum-provider` -> appkit -> qrcode) is only loaded when a
@@ -36,7 +36,7 @@ function buildConnectors(): CreateConnectorFn[] {
         showQrModal: true,
         metadata: {
           name: "Notes To The World",
-          description: "A decentralized sticky-note corkboard on Base",
+          description: "A decentralized sticky-note corkboard",
           url:
             typeof window !== "undefined"
               ? window.location.origin
@@ -51,13 +51,14 @@ function buildConnectors(): CreateConnectorFn[] {
 }
 
 export const config = createConfig({
-  // Base Sepolia first so it is the default chain the board reads from.
-  // Flip the order to [base, baseSepolia] to default to mainnet.
-  chains: [baseSepolia, base],
+  // Robinhood Chain (mainnet) first so it is the default chain the board
+  // reads from. Flip the order to [baseSepolia, robinhood] to default to
+  // the testnet.
+  chains: [robinhood, baseSepolia],
   connectors: buildConnectors(),
   transports: {
+    [robinhood.id]: http(process.env.NEXT_PUBLIC_ROBINHOOD_RPC_URL),
     [baseSepolia.id]: http(process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL),
-    [base.id]: http(process.env.NEXT_PUBLIC_BASE_RPC_URL),
   },
   ssr: true,
 });

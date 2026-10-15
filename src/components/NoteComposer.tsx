@@ -11,12 +11,11 @@ import {
 } from "wagmi";
 import { Dices, Loader2, MapPinned, Pin, X } from "lucide-react";
 import {
-  ETH_FEE,
   MAX_UINT256,
-  PAYMENT_TOKEN_ADDRESS,
   TOKEN_FEE,
   erc20Abi,
   getNotesContractAddress,
+  getPaymentTokenAddress,
   retroNotesAbi,
 } from "@/lib/contract";
 import {
@@ -62,16 +61,21 @@ export default function NoteComposer({
   const [rotation, setRotation] = useState<number>(() => randomRotation());
 
   const contractAddress = getNotesContractAddress();
+  const paymentTokenAddress = getPaymentTokenAddress();
+  const isFullyConfigured = Boolean(contractAddress && paymentTokenAddress);
   const chainId = useChainId();
   const { address: account, isConnected } = useAccount();
 
   // Allowance the payment token grants this wall (0 until approved).
   const { data: allowance, refetch: refetchAllowance } = useReadContract({
-    address: PAYMENT_TOKEN_ADDRESS,
+    address: paymentTokenAddress,
     abi: erc20Abi,
     functionName: "allowance",
-    args: account && contractAddress ? [account, contractAddress] : undefined,
-    query: { enabled: Boolean(account && contractAddress) },
+    args:
+      account && contractAddress ? [account, contractAddress] : undefined,
+    query: {
+      enabled: Boolean(account && contractAddress && paymentTokenAddress),
+    },
   });
   const needsApproval = allowance === undefined || (allowance as bigint) < TOKEN_FEE;
 
@@ -94,7 +98,7 @@ export default function NoteComposer({
     trimmed.length > 0 &&
     !overLimit &&
     isConnected &&
-    Boolean(contractAddress) &&
+    isFullyConfigured &&
     !isSigning &&
     !isConfirming;
 
@@ -119,13 +123,13 @@ export default function NoteComposer({
   }, [isConfirmed, needsApproval, refetchAllowance, onStamped]);
 
   function handleStamp() {
-    if (!contractAddress || !canStamp) return;
+    if (!contractAddress || !paymentTokenAddress || !canStamp) return;
     reset();
 
     // Step 1: grant the wall an unlimited allowance for the payment token.
     if (needsApproval) {
       writeContract({
-        address: PAYMENT_TOKEN_ADDRESS,
+        address: paymentTokenAddress,
         abi: erc20Abi,
         functionName: "approve",
         args: [contractAddress, MAX_UINT256],
@@ -134,13 +138,12 @@ export default function NoteComposer({
       return;
     }
 
-    // Step 2: stamp, attaching the ETH fee (forwarded to the recipient).
+    // Step 2: stamp — nonpayable; the contract pulls the 1000 NOTES fee.
     writeContract({
       address: contractAddress,
       abi: retroNotesAbi,
       functionName: "stampNote",
       args: [trimmed, color, position.x, position.y, rotation],
-      value: ETH_FEE,
       chainId,
     });
   }
@@ -168,10 +171,10 @@ export default function NoteComposer({
     status = msg.split("\n")[0].slice(0, 90).toUpperCase();
     tone = STATUS_TONE.error;
   } else if (needsApproval) {
-    status = "STEP 1/2 — APPROVE 0.02 FRNPET, THEN STAMP";
+    status = "STEP 1/2 — APPROVE 1000 NOTES, THEN STAMP";
     tone = STATUS_TONE.busy;
   } else {
-    status = `READY — 0.02 FRNPET (BURNED) + 0.00005 ETH`;
+    status = "READY — 1000 NOTES (500 BURNED / 500 POOL)";
     tone = STATUS_TONE.idle;
   }
 

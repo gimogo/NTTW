@@ -12,12 +12,23 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  * @notice A fully autonomous, immutable, ownerless sticky-note wall where
  *         every stamped note is minted on-chain as a unique ERC-721 NFT.
  *
- *         IMD Protocol Hackathon build.
+ *         Gamified weekly reward economy (standalone ERC-721; no Uniswap
+ *         hooks):
+ *           - `stampNote` charges a fixed TOKEN_FEE in the project ERC-20:
+ *             50% is burned, 50% accrues to `weeklyRewardPool`.
+ *           - Time is split into 7-day epochs. Every epoch keeps a live
+ *             top-10 leaderboard (`currentTopMinters`) maintained
+ *             incrementally with a bounded insertion sort (max 10 slots).
+ *           - The first stamp after an epoch boundary rolls the epoch over:
+ *             the pool is distributed 30/15/15/8/8/8/4/4/4/4 (%) by rank,
+ *             empty slots are skipped (their share rolls over), the board
+ *             is cleared, and the counters restart.
  *
- *         Design goals (Base / Base Sepolia L2):
+ *         Design goals (EVM L2s — Robinhood Chain / Base Sepolia):
  *           - No admin, no upgradability, no pause: once deployed, the wall
  *             belongs to everyone forever.
  *           - Custom errors instead of require-strings (cheaper reverts).
+ *           - Checks-Effects-Interactions ordering in every write path.
  *           - Paginated reads (`getNotes`) so the frontend never pulls the
  *             whole array in one eth_call.
  *           - Events carry the full payload so an indexer / frontend listener
@@ -26,6 +37,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *         The public array getter `allNotes(uint256)` is auto-generated and
  *         returns the struct's value-type fields; use `getNotes`/`getNote`
  *         to also retrieve the string fields.
+ *
+ *         Payment-token assumption: `PAYMENT_TOKEN` is a standard ERC-20
+ *         without transfer hooks (no callbacks on transfer/transferFrom),
+ *         so CEI ordering alone makes the state machine reentrancy-safe.
  */
 contract IMDRetroWall is ERC721, ERC721Enumerable {
     using Strings for uint256;
@@ -61,7 +76,7 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
     }
 
     // ---------------------------------------------------------------------
-    // Constants
+    // Note validation constants
     // ---------------------------------------------------------------------
 
     /// @notice Maximum note content length, in bytes (UTF-8), per the spec.
@@ -82,25 +97,40 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
     // Payment constants
     // ---------------------------------------------------------------------
 
-    /// @notice ERC-20 charged per stamp (Fren Pet / FRNPET on Base mainnet),
-    ///         18 decimals. 0.1 token = 10^17 base units.
-    IERC20 public constant PAYMENT_TOKEN =
-        IERC20(0xFF0C532FDB8Cd566Ae169C1CB157ff2Bdc83E105);
+    /// @notice Custom ERC-20 charged per stamp. Set once in the constructor
+    ///         and immutable afterwards — the deployed token must be a
+    ///         standard ERC-20 compliant 18-decimal token.
+    IERC20 public immutable PAYMENT_TOKEN;
 
-    /// @notice Token fee per stamp, in PAYMENT_TOKEN base units (0.02 FRNPET).
-    uint256 public constant TOKEN_FEE = 2e16;
+    /// @notice Total token fee per stamp, in PAYMENT_TOKEN base units
+    ///         (1000 tokens, 18 decimals).
+    uint256 public constant TOKEN_FEE = 1000e18;
 
-    /// @notice Canonical burn (dead) address the token fee is sent to and
+    /// @notice Half of TOKEN_FEE — pulled from the staker straight to the
+    ///         dead address and destroyed in the same transfer.
+    uint256 public constant TOKEN_FEE_BURN_SHARE = TOKEN_FEE / 2; // 500e18
+
+    /// @notice The other half of TOKEN_FEE — pulled from the staker into
+    ///         this contract and added to `weeklyRewardPool`.
+    uint256 public constant TOKEN_FEE_POOL_SHARE = TOKEN_FEE - TOKEN_FEE_BURN_SHARE; // 500e18
+
+    /// @notice Canonical burn (dead) address the burn share is sent to and
     ///         permanently destroyed at.
     address public constant TOKEN_BURN =
         0x000000000000000000000000000000000000dEaD;
 
-    /// @notice ETH fee per stamp, in wei (0.00005 ETH).
-    uint256 public constant ETH_FEE = 50_000_000_000_000;
+    // ---------------------------------------------------------------------
+    // Epoch constants
+    // ---------------------------------------------------------------------
 
-    /// @notice Fixed recipient of the ETH fee. Hardcoded (immutable-style
-    ///         constant) per spec — not the deployer, not changeable.
-    address public constant ETH_RECIPIENT = 0x8d5Ba1fc60fe4d6FB41ED2176f3f2E05FEBC0cA5;
+    /// @notice One epoch lasts exactly 7 days.
+    uint256 public constant EPOCH_DURATION = 7 days;
+
+    /// @notice Leaderboard size — a fixed top 10.
+    uint256 public constant LEADERBOARD_SIZE = 10;
+
+    /// @notice Basis-point denominator for the rank shares (100% = 10 000).
+    uint256 private constant BASIS_POINTS = 10_000;
 
     // ---------------------------------------------------------------------
     // Storage
@@ -121,6 +151,26 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
     ///         the frontend derives stacking z-index from this.
     Note[] public allNotes;
 
+    /// @notice Current epoch number; starts at 1 and increments every
+    ///         EPOCH_DURATION (lazily, on the first stamp after the boundary).
+    uint256 public currentEpoch = 1;
+
+    /// @notice Timestamp the current epoch started. Set at deployment and
+    ///         refreshed on every epoch rollover.
+    uint256 public epochStartTime;
+
+    /// @notice Token pool accrued this epoch: the 50% pool share of every
+    ///         stamp. Distributed to the top 10 on rollover; any share not
+    ///         distributed (empty leaderboard slots) rolls over.
+    uint256 public weeklyRewardPool;
+
+    /// @notice Per-epoch stamped-note counter: epoch => author => count.
+    mapping(uint256 => mapping(address => uint256)) public noteCountPerEpoch;
+
+    /// @notice Fixed-size leaderboard for the current epoch, best first.
+    ///         address(0) means the slot is empty.
+    address[10] public currentTopMinters;
+
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
@@ -138,9 +188,22 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         uint256 timestamp
     );
 
+    /// @notice Emitted when a winner receives its rank share on rollover.
+    event RewardPaid(address indexed winner, uint256 indexed rank, uint256 amount);
+
+    /// @notice Emitted once per epoch rollover with the full settlement.
+    event EpochAdvanced(
+        uint256 indexed previousEpoch,
+        uint256 indexed newEpoch,
+        uint256 distributed,
+        uint256 rolledOverPool
+    );
+
     // ---------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------
+
+    error EmptyPaymentToken();
 
     error EmptyContent();
     error ContentTooLong(uint256 length);
@@ -148,28 +211,38 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
     error InvalidRotation(int8 rotation);
     error PageOutOfBounds(uint256 offset, uint256 total);
     error NoteNotFound(uint256 id);
-    error IncorrectEthFee(uint256 sent, uint256 required);
-    error EthTransferFailed();
     error TokenTransferFailed();
+    error RewardTransferFailed(address winner);
 
     // ---------------------------------------------------------------------
     // Constructor
     // ---------------------------------------------------------------------
 
-    constructor() ERC721("IMD Retro Wall Note", "IMDNOTE") {}
+    constructor(IERC20 _paymentToken) ERC721("IMD Retro Wall Note", "IMDNOTE") {
+        if (address(_paymentToken) == address(0)) {
+            // the fee is token-only; a null token would make every stamp fail
+            revert EmptyPaymentToken();
+        }
+        PAYMENT_TOKEN = _paymentToken;
+        epochStartTime = block.timestamp;
+    }
 
     // ---------------------------------------------------------------------
     // Writes
     // ---------------------------------------------------------------------
 
     /**
-     * @notice Stamp a new note permanently on the wall and mint its NFT.
-     *         Payment is enforced atomically in this same call:
-     *           - `msg.value` must equal `ETH_FEE`; it is forwarded to
-     *             `ETH_RECIPIENT` immediately.
-     *           - `TOKEN_FEE` (0.02 PAYMENT_TOKEN) is pulled from `msg.sender`
-     *             (requires a prior `approve`) and sent to `TOKEN_BURN`, where
-     *             it is destroyed.
+     * @notice Stamp a new note permanently on the wall, mint its NFT, and
+     *         enter the author into the current epoch's leaderboard.
+     *         Payment (token only — no ETH) is enforced atomically:
+     *           - `TOKEN_FEE_BURN_SHARE` (50 tokens) is pulled from
+     *             `msg.sender` straight to `TOKEN_BURN` (destroyed).
+     *           - `TOKEN_FEE_POOL_SHARE` (50 tokens) is pulled from
+     *             `msg.sender` into this contract and added to
+     *             `weeklyRewardPool`.
+     *         Requires a prior ERC-20 `approve` of at least TOKEN_FEE.
+     * @dev  Rolls the epoch over first if a 7-day boundary has passed, so
+     *       the stamp is counted into the fresh epoch.
      * @param _content  Note text, 1..280 UTF-8 bytes.
      * @param _color    Hex color, exactly "#RRGGBB" (or "0xRRGGBB").
      * @param _posX     X coordinate on the 65535-wide virtual canvas.
@@ -183,7 +256,13 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         uint16 _posX,
         uint16 _posY,
         int8 _rotation
-    ) external payable returns (uint256 id) {
+    ) external returns (uint256 id) {
+        // --- Epoch rollover (previous epoch's pool settlement) ---
+        if (block.timestamp >= epochStartTime + EPOCH_DURATION) {
+            _processEpochReset();
+        }
+
+        // --- Checks ---
         uint256 len = bytes(_content).length;
         if (len == 0) revert EmptyContent();
         if (len > MAX_CONTENT_BYTES) revert ContentTooLong(len);
@@ -192,21 +271,7 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
             revert InvalidRotation(_rotation);
         }
 
-        // --- Payment: ETH fee (exact) ---
-        if (msg.value != ETH_FEE) revert IncorrectEthFee(msg.value, ETH_FEE);
-
-        // --- Payment: token fee, pulled then burned ---
-        // Pull 0.02 FRNPET from the sender (needs prior approve) straight to
-        // the dead address, so it is destroyed in one transfer with no
-        // intermediate balance held by this contract.
-        if (!PAYMENT_TOKEN.transferFrom(msg.sender, TOKEN_BURN, TOKEN_FEE)) {
-            revert TokenTransferFailed();
-        }
-
-        // Forward the ETH fee to the fixed recipient.
-        (bool ok, ) = payable(ETH_RECIPIENT).call{value: msg.value}("");
-        if (!ok) revert EthTransferFailed();
-
+        // --- Effects ---
         id = allNotes.length; // ids are sequential, starting at 0
         uint256 ts = block.timestamp;
 
@@ -214,10 +279,30 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
             Note(id, msg.sender, _content, _color, _posX, _posY, _rotation, ts)
         );
 
-        // Mint the note as a unique ERC-721 to its author.
-        _safeMint(msg.sender, id);
+        // Per-epoch counter + live leaderboard maintenance.
+        uint256 newCount = ++noteCountPerEpoch[currentEpoch][msg.sender];
+        _updateLeaderboard(msg.sender, newCount);
+
+        // Accrue this stamp's pool share (the transfer below is atomic with
+        // it — a failed pull reverts the accrual too).
+        weeklyRewardPool += TOKEN_FEE_POOL_SHARE;
 
         emit NoteCreated(id, msg.sender, _content, _color, _posX, _posY, _rotation, ts);
+
+        // --- Interactions ---
+        // 50% of the fee: straight to the dead address (burned).
+        if (!PAYMENT_TOKEN.transferFrom(msg.sender, TOKEN_BURN, TOKEN_FEE_BURN_SHARE)) {
+            revert TokenTransferFailed();
+        }
+        // 50% of the fee: into the contract, backing weeklyRewardPool.
+        if (
+            !PAYMENT_TOKEN.transferFrom(msg.sender, address(this), TOKEN_FEE_POOL_SHARE)
+        ) {
+            revert TokenTransferFailed();
+        }
+
+        // Mint the note as a unique ERC-721 to its author.
+        _safeMint(msg.sender, id);
     }
 
     // ---------------------------------------------------------------------
@@ -261,6 +346,19 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         return allNotes[id];
     }
 
+    /// @notice Batch read of the live leaderboard (rank 1 first; zero
+    ///         addresses mean fewer than 10 minters this epoch).
+    function getCurrentTopMinters() external view returns (address[10] memory) {
+        return currentTopMinters;
+    }
+
+    /// @notice Seconds until the next epoch rollover (0 once due; the next
+    ///         stamp settles the epoch).
+    function timeUntilEpochEnd() external view returns (uint256) {
+        uint256 end = epochStartTime + EPOCH_DURATION;
+        return block.timestamp >= end ? 0 : end - block.timestamp;
+    }
+
     /// @notice On-chain token metadata (data URI). Exposes the note's
     ///         content, author, color, position and rotation so each NFT
     ///         is fully self-describing without an off-chain server.
@@ -290,6 +388,13 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
                 "\"},"
             )
         );
+        string memory content = string(
+            abi.encodePacked(
+                "{\"trait_type\":\"Content\",\"value\":\"",
+                _jsonEscape(n.content),
+                "\"},"
+            )
+        );
         string memory pos = string(
             abi.encodePacked(
                 "{\"trait_type\":\"posX\",\"value\":",
@@ -312,14 +417,153 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         );
 
         string memory json = string(
-            abi.encodePacked(header, author, color, pos, tail)
+            abi.encodePacked(header, author, color, content, pos, tail)
         );
 
         return string(abi.encodePacked("data:application/json,", json));
     }
 
     // ---------------------------------------------------------------------
-    // Internals
+    // Internals — leaderboard
+    // ---------------------------------------------------------------------
+
+    /**
+     * @dev Keeps `currentTopMinters` sorted with a bounded insertion sort
+     *      (fixed 10 slots, at most 10 iterations per pass):
+     *        1. If the minter already holds a slot, shift the tail up one to
+     *           close the gap.
+     *        2. Scan from rank 1 and insert before the first slot whose
+     *           count is strictly smaller (or the first empty slot).
+     *      Tie-breaker: the scan uses a STRICT `<` comparison, so a member
+     *      that already holds a given count keeps the higher rank over any
+     *      later arrival reaching the same count.
+     */
+    function _updateLeaderboard(address minter, uint256 newCount) private {
+        // Pass 1: locate and evict the minter's current slot, if any.
+        for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
+            if (currentTopMinters[i] == minter) {
+                for (uint256 j = i; j < LEADERBOARD_SIZE - 1; ) {
+                    currentTopMinters[j] = currentTopMinters[j + 1];
+                    unchecked {
+                        ++j;
+                    }
+                }
+                currentTopMinters[LEADERBOARD_SIZE - 1] = address(0);
+                break;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+
+        // Pass 2: find the insertion rank (first strictly-lower count, or
+        // the first empty slot). insertAt == 10 → didn't make the board.
+        uint256 insertAt = LEADERBOARD_SIZE;
+        for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
+            address holder = currentTopMinters[i];
+            if (holder == address(0) || noteCountPerEpoch[currentEpoch][holder] < newCount) {
+                insertAt = i;
+                break;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        if (insertAt == LEADERBOARD_SIZE) return;
+
+        // Shift the tail down one slot and place the minter.
+        for (uint256 i = LEADERBOARD_SIZE - 1; i > insertAt; ) {
+            currentTopMinters[i] = currentTopMinters[i - 1];
+            unchecked {
+                --i;
+            }
+        }
+        currentTopMinters[insertAt] = minter;
+    }
+
+    // ---------------------------------------------------------------------
+    // Internals — epoch rollover
+    // ---------------------------------------------------------------------
+
+    /**
+     * @dev Settles the ending epoch, strictly CEI-style: every storage
+     *      effect (pool accounting, leaderboard clear, epoch bump) is
+     *      committed BEFORE the single external interaction type (ERC-20
+     *      transfers to winners).
+     *
+     *      Rank shares (basis points): 1st 30%, 2nd-3rd 15% each,
+     *      4th-6th 8% each, 7th-10th 4% each (sums to exactly 100%).
+     *      Empty slots are skipped; their share stays in the contract and
+     *      rolls over into the next epoch's pool. Both share computations
+     *      below use identical integer math, so the summed transfers match
+     *      `distributed` to the wei.
+     */
+    function _processEpochReset() private {
+        uint256 pool = weeklyRewardPool;
+        address[10] memory winners = currentTopMinters; // snapshot for payouts
+
+        // Rank shares; identical literal in both loops by construction.
+        uint256[10] memory shareBps = [
+            uint256(3000),
+            1500,
+            1500,
+            800,
+            800,
+            800,
+            400,
+            400,
+            400,
+            400
+        ];
+
+        // ---- Effects ----
+        uint256 distributed;
+        if (pool > 0) {
+            for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
+                if (winners[i] != address(0)) {
+                    distributed += (pool * shareBps[i]) / BASIS_POINTS;
+                }
+                unchecked {
+                    ++i;
+                }
+            }
+            // Rollover: only what was actually claimed leaves the pool.
+            weeklyRewardPool = pool - distributed;
+        }
+        for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
+            currentTopMinters[i] = address(0);
+            unchecked {
+                ++i;
+            }
+        }
+        uint256 previousEpoch = currentEpoch;
+        currentEpoch = previousEpoch + 1;
+        epochStartTime = block.timestamp;
+
+        // ---- Interactions ----
+        if (pool > 0) {
+            for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
+                address winner = winners[i];
+                if (winner != address(0)) {
+                    uint256 share = (pool * shareBps[i]) / BASIS_POINTS;
+                    if (share > 0) {
+                        if (!PAYMENT_TOKEN.transfer(winner, share)) {
+                            revert RewardTransferFailed(winner);
+                        }
+                        emit RewardPaid(winner, i + 1, share);
+                    }
+                }
+                unchecked {
+                    ++i;
+                }
+            }
+        }
+
+        emit EpochAdvanced(previousEpoch, currentEpoch, distributed, weeklyRewardPool);
+    }
+
+    // ---------------------------------------------------------------------
+    // Internals — helpers
     // ---------------------------------------------------------------------
 
     /// @dev Fetches a note by id, reverting if it does not exist. Reuses the
@@ -350,6 +594,83 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
             }
         }
         return string(s);
+    }
+
+    /// @dev Escapes a note's content for embedding in the tokenURI JSON
+    ///      string (quotes, backslashes, and control characters), so any
+    ///      valid UTF-8 note renders as legal JSON metadata.
+    function _jsonEscape(string memory s) internal pure returns (string memory) {
+        bytes memory inB = bytes(s);
+        uint256 len = inB.length;
+        // Worst case per byte: "\u00XX" = 6 chars.
+        uint256 cap = len * 6;
+        // Scratch buffer of raw bytes. Staying on the `uint8[]` type (instead
+        // of indexing `bytes` directly) sidesteps a solc 0.8.20 codegen quirk
+        // where a `bytes` index inside an `unchecked` loop can still panic
+        // 0x32 out-of-bounds; we cast to `bytes` once, at the end.
+        uint8[] memory buf = new uint8[](cap);
+        uint256 j = 0;
+
+        for (uint256 i = 0; i < len; ) {
+            uint8 v = uint8(inB[i]);
+            if (v == 0x22) {
+                // '"'
+                buf[j] = 0x5c;
+                buf[j + 1] = 0x22;
+                j += 2;
+            } else if (v == 0x5c) {
+                // '\\'
+                buf[j] = 0x5c;
+                buf[j + 1] = 0x5c;
+                j += 2;
+            } else if (v == 0x0a) {
+                // '\n'
+                buf[j] = 0x5c;
+                buf[j + 1] = 0x6e;
+                j += 2;
+            } else if (v == 0x0d) {
+                // '\r'
+                buf[j] = 0x5c;
+                buf[j + 1] = 0x72;
+                j += 2;
+            } else if (v == 0x09) {
+                // '\t'
+                buf[j] = 0x5c;
+                buf[j + 1] = 0x74;
+                j += 2;
+            } else if (v < 0x20) {
+                // Other control chars -> \u00XX
+                buf[j] = 0x5c;
+                buf[j + 1] = 0x75;
+                buf[j + 2] = 0x30;
+                buf[j + 3] = 0x30;
+                buf[j + 4] = uint8(bytes1(_hexDigit(v >> 4)));
+                buf[j + 5] = uint8(bytes1(_hexDigit(v & 0x0f)));
+                j += 6;
+            } else {
+                buf[j] = v;
+                j += 1;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+
+        bytes memory out = new bytes(j);
+        for (uint256 k = 0; k < j; ) {
+            out[k] = bytes1(buf[k]);
+            unchecked {
+                ++k;
+            }
+        }
+        return string(out);
+    }
+
+    /// @dev Nibble (0..15) -> lowercase hex character.
+    function _hexDigit(uint8 nibble) private pure returns (bytes1) {
+        return nibble < 10
+            ? bytes1(uint8(0x30) + nibble) // '0'..'9'
+            : bytes1(uint8(0x61) + nibble - 10); // 'a'..'f'
     }
 
     /// @dev Accepts "#RRGGBB" (7 bytes) or "0xRRGGBB" (8 bytes), case-insensitive.

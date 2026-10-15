@@ -20,19 +20,19 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://imd-retro-wall.vercel.app"),
   title: "Notes To The World — On-chain Sticky Notes as NFTs",
   description:
-    "A decentralized, permanent sticky-note corkboard on Base. Every note is stamped on-chain and minted as a unique ERC-721 NFT.",
+    "A decentralized, permanent sticky-note corkboard on Robinhood Chain. Every note is stamped on-chain and minted as a unique ERC-721 NFT.",
   // Twitter / X summary-large card
   twitter: {
     card: "summary_large_image",
     title: "Notes To The World — On-chain Sticky Notes as NFTs",
     description:
-      "Stamp a note on a retro corkboard. Each note is minted as an ERC-721 NFT on Base.",
+      "Stamp a note on a retro corkboard. Each note is minted as an ERC-721 NFT on Robinhood Chain.",
   },
   openGraph: {
     type: "website",
     title: "Notes To The World — On-chain Sticky Notes as NFTs",
     description:
-      "Stamp a note on a retro corkboard. Each note is minted as an ERC-721 NFT on Base.",
+      "Stamp a note on a retro corkboard. Each note is minted as an ERC-721 NFT on Robinhood Chain.",
     siteName: "Notes To The World",
   },
 };
