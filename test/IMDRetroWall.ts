@@ -1,5 +1,69 @@
 import { expect } from "chai";
+import solc from "solc";
 import { ethers, network } from "hardhat";
+
+/**
+ * Minimal ERC-20 compiled AT TEST TIME with solc (in-memory, never written
+ * into `contracts/`). It exists so the wall's fee wiring (approve →
+ * transferFrom → burn share to TOKEN_BURN + pool share to the contract) is
+ * exercised against real ERC-20 semantics. The live wall is constructed with
+ * the deployed NOTES token instead.
+ */
+const MOCK_TOKEN_SOURCE = `
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract MockPaymentToken {
+    string public name = "Mock Notes";
+    string public symbol = "mNOTES";
+    uint8 public decimals = 18;
+
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+        totalSupply += amount;
+        emit Transfer(address(0), to, amount);
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        _move(msg.sender, to, amount);
+        return true;
+    }
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) external returns (bool) {
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= amount, "mNOTES: insufficient allowance");
+        if (allowed != type(uint256).max) {
+            allowance[from][msg.sender] = allowed - amount;
+        }
+        _move(from, to, amount);
+        return true;
+    }
+
+    function _move(address from, address to, uint256 amount) internal {
+        require(balanceOf[from] >= amount, "mNOTES: insufficient balance");
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(from, to, amount);
+    }
+}
+`;
 
 const CONTENT = "gm from the corkboard!";
 const COLOR = "#FFF2A5";
@@ -20,9 +84,31 @@ describe("IMDRetroWall", function () {
   let carol: typeof alice;
   let signers: Awaited<ReturnType<typeof ethers.getSigners>>;
 
-  /** Deploy a fresh minimal ERC-20; the wall is constructed with its address. */
+  /**
+   * Compile the in-memory ERC-20 above with solc (same release family as the
+   * hardhat compiler), then deploy it fresh for every test run.
+   */
   async function installMockToken() {
-    const Mock = await ethers.getContractFactory("MockPaymentToken");
+    const output = JSON.parse(
+      solc.compile(
+        JSON.stringify({
+          language: "Solidity",
+          sources: { "MockPaymentToken.sol": { content: MOCK_TOKEN_SOURCE } },
+          settings: {
+            outputSelection: {
+              "*": { "*": ["abi", "evm.bytecode"] },
+            },
+          },
+        })
+      )
+    );
+    const {
+      abi,
+      evm: {
+        bytecode: { object: bytecode },
+      },
+    } = output.contracts["MockPaymentToken.sol"]["MockPaymentToken"];
+    const Mock = await ethers.getContractFactory(abi, "0x" + bytecode);
     const mock = await Mock.deploy();
     await mock.waitForDeployment();
     return mock;
@@ -59,7 +145,7 @@ describe("IMDRetroWall", function () {
     wall = await factory.deploy(await token.getAddress());
     await wall.waitForDeployment();
 
-    // Fund alice/bob/carol with FRNPET, then grant the wall an unlimited
+    // Fund alice/bob/carol with mock NOTES, then grant the wall an unlimited
     // allowance (matches the frontend's approve-once behaviour) so each user
     // can stamp many notes without re-approving.
     const wallAddress = await wall.getAddress();

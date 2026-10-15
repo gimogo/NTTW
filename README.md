@@ -48,7 +48,6 @@ the **top 10 stampers of the week** — enforced atomically in the same transact
 ```
 contracts/
   IMDRetroWall.sol              # the immutable notes wall + ERC-721 minting + paid stamping
-  MockPaymentToken.sol          # minimal ERC-20 used only by tests (wall gets its address in the constructor)
 scripts/deploy.ts               # deploy script (prints env hint)
 test/IMDRetroWall.ts            # hardhat tests (validation, events, pagination, payments)
 hardhat.config.ts               # 0.8.20 / optimizer / Robinhood Chain + Base Sepolia
