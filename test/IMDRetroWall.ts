@@ -90,7 +90,7 @@ const TOKEN_BURN = "0x000000000000000000000000000000000000dEaD";
 const BURN_SHARE = ethers.parseEther("500");
 const POOL_SHARE = ethers.parseEther("500");
 const STAMP_COST = ethers.parseEther("1000");
-const EPOCH = 7 * 24 * 60 * 60;
+const EPOCH = 3 * 24 * 60 * 60;
 const RETRY_DELAY = 24 * 60 * 60;
 
 // CCIP chain selectors (Robinhood Chain = wall, Base = relay).

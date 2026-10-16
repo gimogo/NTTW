@@ -1,7 +1,9 @@
 import { ethers } from "hardhat";
 
-const WALL = "0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110";
-const RELAY = "0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110";
+// Production pair redeployed 2026-10-16 (the first production relay lacked ERC-165).
+// Superseded pair: 0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110 (both chains).
+const WALL = "0x9550E4F888d1C084CB1C8E74677Da54109723EE3";
+const RELAY = "0x887bbed753938087Ce61Ca768a358848177E6eaA";
 const ROBINHOOD_RPC = "https://rpc.mainnet.chain.robinhood.com";
 const BASE_RPC = "https://mainnet.base.org";
 const VRF_COORDINATOR_BASE = "0xd5D517aBE5cF79B7e95eC98dB0f0277788aFF634";

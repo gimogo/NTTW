@@ -131,7 +131,7 @@ contract IMDRetroWall is ERC721, ERC721Enumerable, IAny2EVMMessageReceiver {
     // ---------------------------------------------------------------------
 
     /// @notice One epoch lasts exactly 7 days.
-    uint256 public constant EPOCH_DURATION = 7 days;
+    uint256 public constant EPOCH_DURATION = 3 days;
 
     /// @notice Maximum stamps one address may make per epoch.
     uint256 public constant MAX_STAMPS_PER_EPOCH = 5;

@@ -8,12 +8,15 @@ lives on **Base** (8453) and ships every epoch's winning word back over **Chainl
 
 - Every stamped note is a real on-chain `string` (≤280 bytes, validated UTF-8) — no IPFS.
 - Every stamp costs **1000 NOTES**: **500 burned** to `0x…dEaD`, **500 pooled** for that epoch.
-- Every stamp is a lottery ticket. When the 7-day epoch ends, the pool is paid to **one**
-  winner, chosen by a **Chainlink VRF v2.5** word that crosses the chain boundary via CCIP.
+- Every stamp is a lottery ticket. When the epoch ends (3 days on the production wall,
+  genesis-based), the pool is paid to **one** winner, chosen by a **Chainlink VRF v2.5** word
+  that crosses the chain boundary via CCIP.
 
-> Live status: both contracts deployed and wired; CCIP is verified two-way live on mainnets;
-> the VRF request path is exercised live and currently pending on Chainlink's fulfiller —
-> details in §6 (Verification & live tests).
+> Live status: both contracts deployed and wired. The production pair was **re-deployed on
+> 2026-10-16** because the first production relay lacked the ERC-165 claim the CCIP off-ramp
+> probes for, and could never request VRF (details in §3 and §6). The new pair is verified
+> on-chain: ERC-165 claimed, runtime bytecode equals the compiled artifact, wiring read back
+> both ways. Epochs are **3 days** on the production wall; epoch 1 ends 2026-10-19 04:28:50 UTC.
 
 ---
 
@@ -84,22 +87,65 @@ The Chainlink interfaces are minimal local copies — the full `@chainlink/contr
 pulls a git dependency pnpm blocks here, and the surface actually used is deliberately ~3
 functions wide.
 
+### The NOTES token and the Uniswap V4 pool (external infrastructure, not NTTW code)
+
+The wall's payment token, **NOTES**, was launched through the **IMD Protocol** as a Uniswap
+**V4** pool against IMD. This is launch infrastructure we consume — not our custom code — and
+is listed here so judges can verify the token side independently:
+
+| Item | Value |
+| --- | --- |
+| NOTES ERC-20 (18 decimals, 1,000,000,000 supply, no callable mint/burn) | `0x03b76ccf7cfeec5198c81c5844b88a78e68a6173` (Robinhood Chain 4663) — verified on [RobinScan](https://robin.etherscan.io/token/0x03b76ccf7cfeec5198c81c5844b88a78e68a6173) |
+| Pool | NOTES / IMD (`0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127`), fee 12,500 (1.25%), tickSpacing 60, Uniswap V4 PoolManager `0x8366a39CC670B4001A1121B8F6A443A643e40951` |
+| poolId | `0x27c60c8dcaf32a6bc17e1d54e9eddf194d5d5319adbacf2ebb89023be1e95b80` |
+| Launch transaction (mint + Initialize + pool seeding, block 89,350,492) | [`0x874397f3de80109a73ca8bae153efb7a9005cb73f8c271055f679b455fdc55f2`](https://robin.etherscan.io/tx/0x874397f3de80109a73ca8bae153efb7a9005cb73f8c271055f679b455fdc55f2) |
+| Launch hook | `PoolInitializationGuard` at `0x19Bec7C2E1b2aadAf67b259744751a9960d66000` (verified source) |
+| What the hook does | Only implements `beforeInitialize`: it reverts with `NotFactoryInitialization` unless the pool is initialized by the IMD launch factory — i.e. it gates who can create/initialize the pool. It takes no fees, adds no limits, and does not touch swaps or liquidity |
+| Launch records | Project: [github.com/identity-md-launches/launch-1866-notes](https://github.com/identity-md-launches/launch-1866-notes); distributor (10% agents): `0xd89c2f7745d28c9c5e5466781c5a14be1f4fe9f3` |
+
+Distribution at launch: 88% as pool liquidity, 880,000,000 NOTES now sit in the V4 PoolManager
+(read back via `balanceOf`), 10% to 409 agent wallets via the Merkle distributor, 2% to the
+requester. **Hook ≠ our code**: `PoolInitializationGuard` is IMD's standard launch hook; NTTW's
+custom logic is the wall + relay pair described in §2.
+
 ---
 
 
 ## 3 · Deployments (v3, verify-checked)
 
+**Current production pair — re-deployed from current fixed source on 2026-10-16:**
+
 | Artifact | Chain | Address |
 | --- | --- | --- |
-| **IMDRetroWall v3** (wall, ERC-721) | Robinhood Chain (4663) | `0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110` |
-| **VrfCcipRelay** (relay) | Base (8453) | `0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110` |
+| **IMDRetroWall v3** (wall, ERC-721) | Robinhood Chain (4663) | `0x9550E4F888d1C084CB1C8E74677Da54109723EE3` |
+| **VrfCcipRelay** (relay) | Base (8453) | `0x887bbed753938087Ce61Ca768a358848177E6eaA` |
 | NOTES payment token (existing ERC-20) | Robinhood Chain | `0x03b76ccf7cfeec5198c81c5844b88a78e68a6173` |
+
+Production redeploy evidence (all read back on-chain 2026-10-16):
+
+| Item | Value |
+| --- | --- |
+| Wall creation tx | `0x96a95bb3593ddd496aa818960dc3b39e01b2118c2168691c9deb0504fd87dc7a` (Robinhood block 89,795,280, status 1) |
+| Relay creation tx | `0x20c3ac0a0a55e25f9c53a14a9ce85c9c45f1c511f250892d72e036daa84a37a2` (Base block 52,668,264, status 1) |
+| `setRelay` wiring tx | `0x3b7bb3b490bbd12fc48496fca55c60b1455a4646f0df5f3af39bd11a2828b928` (status 1; `wall.relay()` ⇄ `relay.WALL()` verified both ways) |
+| `GENESIS` / epoch length | `1792124930` (2026-10-16 04:28:50 UTC) / **3 days** → epoch 1 ends **2026-10-19 04:28:50 UTC** |
+| ERC-165 on relay | `supportsInterface(0x85572ffb) = true`, `supportsInterface(0xffffffff) = false` (false, never reverts) |
+| Bytecode equality vs compiled artifact | wall: 19,431 bytes, diffs confined to 16 immutable windows (5 immutables); relay: 4,073 bytes, diffs confined to 18 immutable windows (6 immutables); every window holds the expected constructor value |
+
+**Superseded production pair (kept for history, must never be touched):**
+
+| Artifact | Chain | Address |
+| --- | --- | --- |
+| IMDRetroWall v3 (superseded) | Robinhood Chain | `0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110` |
+| VrfCcipRelay (superseded) | Base | `0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110` |
 | IMDRetroWall v2 (superseded, separate state) | Robinhood Chain | `0x69A8143ecF33527FA8dBD2102AfCE5DE3B210BbE` |
 | IMDRetroWall v1 (superseded) | Robinhood Chain | `0x515F8f72B62e22c957D34Ba87b312133eFcAC939` |
 
-Both v3 contracts share one address. This is a CREATE-address coincidence (same deployer and
-nonce on both chains), not a shared contract — `scripts/status.ts` reads code + wiring on each
-chain independently. v2/v1 remain for history only; v2 notes do not migrate to v3.
+The superseded production relay **lacks ERC-165**, so the CCIP off-ramp silently converted its
+messages to token-only no-ops — the old production path could never request VRF. Therefore the
+pair was redeployed fresh (2026-10-16): the orphaned old-wall epoch-1 pool (500 NOTES from the
+single stamp there) is stranded inside the superseded wall — it has no sweep function and is
+disclosed here rather than hidden. v2/v1 remain for history only; v2 notes do not migrate to v3.
 
 External infrastructure:
 
@@ -110,8 +156,10 @@ External infrastructure:
 | VRF v2.5 coordinator | — | `0xd5D517aBE5cF79B7e95eC98dB0f0277788aFF634` |
 | VRF key hash | — | 2 gwei `0x00b81b5a…`; 30 gwei `0xdc2f8767…` |
 
-Funding at deploy: VRF subscription **0.0002 ETH** (native), relay **0.0002 ETH** for CCIP reply
-fees — deliberately small; top up before depending on settlements (§5 readback:
+Funding at deploy (2026-10-16 pair): VRF subscription **0.0008 ETH** (native, sub id
+`51441836222580451052993458818119349024779142164800689033215217746100047214776`, consumer = the
+new relay, `reqCount = 0`), relay **0.0005 ETH** for CCIP reply fees (≈ 7 legs at the quoted
+0.0000658 ETH per leg); top up before depending on settlements (§5 readback:
 `TS_NODE_PROJECT=tsconfig.hardhat.json npx hardhat run scripts/status.ts --network robinhood`).
 
 ---
@@ -167,10 +215,49 @@ CCIP/VRF leg *delays* (never destroys) a prize — the epoch stays Requested and
 | `tsc` strict (hardhat + frontend) | ✅ |
 | `npm run build` (Next.js prod build, typecheck) | ✅ |
 | Deployment + wiring read back on both chains (`wall.relay()`, relay `WALL()`, key hash, VRF consumer, subscription balance) | ✅ via `scripts/status.ts` |
+| **Production-relay ERC-165 probe (the exact check the superseded pair fails)** | ✅ `supportsInterface(0x85572ffb) = true`, `supportsInterface(0xffffffff) = false` (false, never reverts) |
+| **Production bytecode equality vs compiled artifact** | ✅ wall 19,431 B / relay 4,073 B — all diffs inside immutable windows only |
+| **Production wiring both ways** | ✅ `wall.relay()` = relay, `relay.WALL()` = wall, router/selector/key-hash/sub-id match deploy values |
 | **CCIP wall → relay, live** | ✅ executed on mainnet; relay's `ccipReceive` verified invoked (on-chain trace) |
 | **VRF request live** | ✅ `RandomWordsRequested` + on-chain commitment emitted |
-| **VRF fulfillment → CCIP back → `WinnerDrawn`** | ⚠️ pending on Chainlink's fulfiller — not our plumbing (see below) |
-| External audit | ❌ none |
+| **VRF fulfillment → CCIP back → `WinnerDrawn`** | ⚠️ pending on Chainlink's fulfiller — observed on the **test pairs (r2/r4)**; the fresh production relay has not yet made a request at writing time (first production `requestSettlement` cannot fire before epoch 1 ends, 2026-10-19 04:28:50 UTC) — see below |
+| [IMD audit](https://github.com/Identity-md/research/blob/main/jobs/16c65a39-24f4-47d6-a9f5-2140c70791c6/files/AUDIT.md) (commit `d063100`, earlier top-10-leaderboard design) | ⚠️ completed, but on the earlier design — see the audit-status note below; v3 has **not** been re-audited |
+
+#### The two distinct on-chain failure causes (recorded 2026-10-16)
+
+- **Superseded production pair — relay bytecode stale (fixed by redeploy).** The deployed relay
+  of the old production pair (`0xbD4808f0…2110`) predates the ERC-165 fix: it cannot answer the
+  off-ramp's `supportsInterface` probe, so every wall→relay data message is executed as a
+  token-only no-op (CCIP still reports SUCCESS). No VRF request ever reached the coordinator
+  from that relay — witnessed on-chain by w1's message SUCCESS with zero receiver activity, and
+  by w3's `UnexpectedSender` FAILURE (relay bound to a different wall). Resolution: fresh pair
+  redeploy on 2026-10-16 (§3).
+- **Test pairs (r2/r4) — VRF fulfiller stall (open).** These relays are correct (ERC-165 claimed,
+  `ccipReceive` verified by on-chain trace, two VRF requests committed on-chain), but the
+  requests are pending for many hours — an off-chain Chainlink fulfiller-selection issue, not
+  our plumbing. Evidence: sub `554014898…679128` `pendingRequestExists = true`, plus three probe
+  requests on sub `693592238…789700`; support-ticket text was prepared on 2026-10-16.
+
+#### Audit status (honest)
+
+The IMD security audit covered commit `d063100` — the earlier design with a top-10 leaderboard.
+It found 2 medium, 7 low and 5 info findings. Against the current v3 code:
+
+- **Fixed in v3** (design change or code fix, with evidence in `FACTS.md` §7): pull-based single-winner
+  payout replaces the push-loop leaderboard (`claimable[winner] += prize` + `claimReward()`,
+  `IMDRetroWall.sol:439-451`); strict `#RRGGBB` color validation (`IMDRetroWall.sol:682-697`);
+  strict RFC 3629 UTF-8 validation (`IMDRetroWall.sol:699-751`); base64-encoded `tokenURI` (no raw `#`);
+  `getNotes` bounds panic removed (`IMDRetroWall.sol:502`); genesis-based epochs (no lazy rollover);
+  `@openzeppelin/contracts` in `package.json`; `TextEncoder().encode()` byte-length in the composer
+  (`src/components/NoteComposer.tsx:97-98`); `InvalidTokenDecimals` check in the constructor
+  (`IMDRetroWall.sol:284-285`); NatSpec/constant drift fixed.
+- **Not applicable in v3**: the tested push-loop failure path no longer exists in any form.
+- **Still open / by design**: direct token transfers to the wall are untracked and unrecoverable
+  (no sweep function); this is documented in §5.
+
+**v3 itself has not been re-audited.** "Fixed" above means verified against v3 source during this
+project's own inspection — not a second audit. For judging purposes, treat the audit as covering the
+superseded `d063100` design.
 
 ### What the live rehearsal proved (2026-10-15, on 10-minute test walls)
 
@@ -242,7 +329,7 @@ Chainlink lanes differ in fulfiller coverage (see §6).
 ### Frontend (`.env.local`)
 
 ```bash
-NEXT_PUBLIC_NOTES_CONTRACT_ADDRESS=0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110
+NEXT_PUBLIC_NOTES_CONTRACT_ADDRESS=0x9550E4F888d1C084CB1C8E74677Da54109723EE3
 NEXT_PUBLIC_PAYMENT_TOKEN_ADDRESS=0x03b76ccf7cfeec5198c81c5844b88a78e68a6173
 NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=   # optional
 ```

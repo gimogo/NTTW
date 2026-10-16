@@ -11,7 +11,8 @@ import { ethers, network } from "hardhat";
  * transaction if the signer holds less than TOKEN_FEE.
  */
 
-const WALL = process.env.WALL_ADDRESS || "0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110";
+// Production wall redeployed 2026-10-16; old wall 0xbD4808f0…2110 is superseded.
+const WALL = process.env.WALL_ADDRESS || "0x9550E4F888d1C084CB1C8E74677Da54109723EE3";
 const TOKEN = "0x03b76ccf7cfeec5198c81c5844b88a78e68a6173";
 const TOKEN_FEE = 1_000_000_000_000_000_000_000n; // 1000e18
 

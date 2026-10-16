@@ -1,0 +1,5 @@
+NOTES To The World: an on-chain corkboard where every sticky note is an ERC-721 and its weekly prize pool is settled cross-chain by Chainlink VRF v2.5.
+A stamp costs 1000 NOTES: 500 burned, 500 pooled; stamps are weekly-epoch tickets. Anyone can requestSettlement at epoch end (pays the CCIP fee); the ownerless VrfCcipRelay (Base) requests one VRF word and returns it over CCIP; the wall computes winner = word % ticketCount and pays via claimReward().
+Custom contracts: IMDRetroWall (ERC-721, Robinhood 4663), VrfCcipRelay (Base). NOTES launched via the IMD Protocol as a Uniswap V4 NOTES/IMD pool (fee 1.25%); its guard hook is IMD's launch hook, not ours.
+Honest: CCIP wall-to-relay ran live on mainnets (test-wall rehearsal); VRF fulfillment is pending on Chainlink's side - no WinnerDrawn yet. An IMD audit covered the earlier leaderboard design (d063100); v3 is not re-audited.
+Repo: github.com/gimogo/NTTW - X: @NotestotheW
