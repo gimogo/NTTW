@@ -6,6 +6,12 @@ prize pool is settled cross-chain by Chainlink CCIP + VRF.**
 Live on **two chains at once**: notes live on **Robinhood Chain** (4663); the randomness engine
 lives on **Base** (8453) and ships every epoch's winning word back over **Chainlink CCIP**.
 
+- **Live app:** TODO — add the deployed frontend URL here before submission.
+- **Ticket transparency:** every ticket so far comes from the deployer wallet (`0x380fbF99…b019`) —
+  the first production stamp tx is
+  [`0xc6341f2e…09269b36`](https://robin.etherscan.io/tx/0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36)
+  (block 89837366); epoch 1 currently holds exactly 1 ticket worth a 500 NOTES pool.
+
 - Every stamped note is a real on-chain `string` (≤280 bytes, validated UTF-8) — no IPFS.
 - Every stamp costs **1000 NOTES**: **500 burned** to `0x…dEaD`, **500 pooled** for that epoch.
 - Every stamp is a lottery ticket. When the epoch ends (3 days on the production wall,

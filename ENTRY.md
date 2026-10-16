@@ -33,6 +33,8 @@ Verify it yourself:
 | IMDRetroWall v3 (wall, ERC-721) — production pair, redeployed 2026-10-16 | Robinhood 4663 | https://robin.etherscan.io/address/0x9550E4F888d1C084CB1C8E74677Da54109723EE3 |
 | VrfCcipRelay (production pair, redeployed 2026-10-16) | Base 8453 | https://basescan.org/address/0x887bbed753938087Ce61Ca768a358848177E6eaA |
 | Production `setRelay` wiring tx (one-shot) | Robinhood 4663 | https://robin.etherscan.io/tx/0x3b7bb3b490bbd12fc48496fca55c60b1455a4646f0df5f3af39bd11a2828b928 |
+| **Live production stamp — the first ticket of epoch 1** (all tickets so far come from the deployer wallet) | Robinhood 4663 | https://robin.etherscan.io/tx/0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36 (block 89,837,366; ticket pool = 500 NOTES) |
+| Live app | Robinhood 4663 | TODO — add the deployed frontend URL before submission |
 | Superseded production pair (old wall+relay, shared address; relay lacked ERC-165, can never settle) | both chains | https://robin.etherscan.io/address/0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110 |
 | NOTES token | Robinhood 4663 | https://robin.etherscan.io/token/0x03b76ccf7cfeec5198c81c5844b88a78e68a6173 |
 | Launch tx (V4 Initialize + pool seeding, block 89,350,492) | Robinhood 4663 | https://robin.etherscan.io/tx/0x874397f3de80109a73ca8bae153efb7a9005cb73f8c271055f679b455fdc55f2 |

@@ -12,6 +12,8 @@ Dibuat 2026-10-16; status live dibaca via RPC publik Robinhood (`rpc.mainnet.cha
 
 ## 1b · Pasangan produksi AKTIF — redeploy 2026-10-16 (semua dibaca balik on-chain)
 
+Live app: TODO — add the deployed frontend URL here (mirrors ENTRY.md).
+
 | Item | Nilai | Sumber |
 | --- | --- | --- |
 | Wall v3 aktif (ERC-721) | Robinhood 4663: `0x9550E4F888d1C084CB1C8E74677Da54109723EE3` | `scripts/status.ts` (konst baru); `eth_call relay()` |
@@ -27,6 +29,7 @@ Dibuat 2026-10-16; status live dibaca via RPC publik Robinhood (`rpc.mainnet.cha
 | VRF sub (aktif) | `51441836222580451052993458818119349024779142164800689033215217746100047214776`; native 0.0008 ETH; reqCount 0; owner = wallet kita; consumer = relay (satu-satunya) | `getSubscription` coordinator `0xd5D517aB…` |
 | Relay ETH (Base) | 0.0005 ETH | `eth_getBalance` |
 | Key hash | 2 gwei `0x00b81b5a830cb0a4009fbd8904de511e28631e62ce5ad231373d3cdad373ccab` | `relay.KEY_HASH()`; cocok nilai deploy |
+| **Stempel produksi pertama (wallet deployer, satu-satunya sumber tiket saat ini)** | approve `0x355c8687ace708e28d53228251196d5ee94a13fffb7adebdc78ff0d56a3a9bf0` (status 1) lalu `stampNote` `0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36` (status 1, **block 89.837.366**) → `ticketCount(1)=1`, `epochPrize(1)=500 NOTES`, `totalNotes=1` | `/tmp/stamp-newwall.log` (`scripts/stamp-first.ts`), readback `ticketCount/epochPrize` via RPC |
 
 Input verifikasi explorer (Standard-JSON, solc 0.8.20, optimizer 200, evmVersion paris):
 `verification/wall-standard-json-input.json` (RobinScan, IMDRetroWall),
