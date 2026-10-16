@@ -29,7 +29,9 @@ Live app: TODO — add the deployed frontend URL here (mirrors ENTRY.md).
 | VRF sub (aktif) | `51441836222580451052993458818119349024779142164800689033215217746100047214776`; native 0.0008 ETH; reqCount 0; owner = wallet kita; consumer = relay (satu-satunya) | `getSubscription` coordinator `0xd5D517aB…` |
 | Relay ETH (Base) | 0.0005 ETH | `eth_getBalance` |
 | Key hash | 2 gwei `0x00b81b5a830cb0a4009fbd8904de511e28631e62ce5ad231373d3cdad373ccab` | `relay.KEY_HASH()`; cocok nilai deploy |
-| **Stempel produksi pertama (wallet deployer, satu-satunya sumber tiket saat ini)** | approve `0x355c8687ace708e28d53228251196d5ee94a13fffb7adebdc78ff0d56a3a9bf0` (status 1) lalu `stampNote` `0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36` (status 1, **block 89.837.366**) → `ticketCount(1)=1`, `epochPrize(1)=500 NOTES`, `totalNotes=1` | `/tmp/stamp-newwall.log` (`scripts/stamp-first.ts`), readback `ticketCount/epochPrize` via RPC |
+| **Status VRF/settlement live (dibaca 2026-10-16 ~07:10 UTC)** | epoch 1: 1 tiket (deployer), pool 500 NOTES, `settlementStatus(1)=None`; relay `randomnessReady(1)=false`, `delivered(1)=false`; VRF sub 0.0008 ETH `reqCount=0` consumer = relay saja; relay ETH 0.0005. `requestSettlement(1)` produksi baru BISA dikirim setelah epoch 1 berakhir **2026-10-19 04:28:50 UTC**; skrip `settle-prod.ts` mengirim SEKALI saja, lalu `deliver(1)` di Base saat word ready (tidak pernah re-request saat pending) | `/tmp/onchain-status.js` + `/tmp/settle-prod-dryrun.log` (SETTLE_DRY_RUN=1, tanpa transaksi) |
+| **Status verifikasi explorer (2026-10-16 07:13 UTC)** | Basescan masih menampilkan relay produksi `Contract: Unverified`; halaman RobinScan tidak terbaca mesin dari host ini — anggap kedua page belum diverifikasi sampai upload Standard-JSON selesai; file input `verification/*.json` sudah ter-commit dan terbukti byte-sama dengan bytecode live | read_url Basescan + `verification/` |
+| **Audit (pasangan produksi)** | Commit `a5c1af9fc13c8413b508b245a997fdfc2689fa81` diaudit 2026-10-16: **2 medium / 5 low / 2 info** — https://github.com/Identity-md/research/blob/main/jobs/44df6543-f9d6-4f44-9d69-40e0f7223b0c/files/AUDIT.md — 9 temuan semuanya *acknowledged, not fixed in the deployed contracts* dengan mitigasi operasional (lihat README §10); audit lama d063100 tetap sebagai riwayat | AUDIT.md |
 
 Input verifikasi explorer (Standard-JSON, solc 0.8.20, optimizer 200, evmVersion paris):
 `verification/wall-standard-json-input.json` (RobinScan, IMDRetroWall),
@@ -104,7 +106,7 @@ Hook **bukan buatan kita**; itu launch-hook milik IMD. Jangan pernah menyebutnya
 - Fee/stamp 1000 NOTES: `contracts/IMDRetroWall.sol:118` (`TOKEN_FEE = 1000e18`).
 - Burn/pool 500/500: `IMDRetroWall.sol:121,124` (`TOKEN_FEE_BURN_SHARE`, `TOKEN_FEE_POOL_SHARE`), dipasok di `:355-356` (safeTransferFrom ke `TOKEN_BURN` dEaD + wall).
 - MAX_STAMPS_PER_EPOCH=5: `IMDRetroWall.sol:137`; cek di `:341` (post-fee cap-core stamp per address per epoch).
-- Epoch 7 hari, GENESIS-based: `IMDRetroWall.sol:134` (`EPOCH_DURATION = 7 days`), GENESIS `:184`, `currentEpoch()` `:462-465` = `(block.timestamp-GENESIS)/EPOCH_DURATION + 1`.
+- Epoch 3 hari, GENESIS-based: `IMDRetroWall.sol:134` (**deployed constant `EPOCH_DURATION = 3 days` = 259200 s**; audit #7 — NatSpec/header di file sumber masih menyebut "7 days", tetapi konstanta ter-deploy adalah 3 hari; sumber kebenaran = baca on-chain), GENESIS `:184`, `currentEpoch()` `:462-465` = `(block.timestamp-GENESIS)/EPOCH_DURATION + 1`.
 - Tiket: `stampsInEpoch[epoch][msg.sender]` & `_tickets[epoch].push(msg.sender)` `:333-345` — uniform random.
 - Winner: `randomWord % ticketCount` di `ccipReceive`: `IMDRetroWall.sol:415,437` dan kata `:232` (`WinnerDrawn` menyimpan `randomWord`).
 - Hadiah: `epochPrize[epoch]` penuh → `claimable[winner] += prize` `:439-442`, di-klaim sendiri via `claimReward()` `:446-451`.

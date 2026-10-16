@@ -1,12 +1,14 @@
 # 📌 Notes To The World (NTTW)
 
-**A permanent, fully on-chain corkboard — where every sticky note is an ERC-721 — whose weekly
-prize pool is settled cross-chain by Chainlink CCIP + VRF.**
+**A permanent, fully on-chain corkboard — where every sticky note is an ERC-721 — whose
+per-epoch prize pool (3-day epochs on the production pair) is settled cross-chain by
+Chainlink CCIP + VRF.**
 
 Live on **two chains at once**: notes live on **Robinhood Chain** (4663); the randomness engine
 lives on **Base** (8453) and ships every epoch's winning word back over **Chainlink CCIP**.
 
-- **Live app:** TODO — add the deployed frontend URL here before submission.
+- **Live app:** [nttw-blush.vercel.app](https://nttw-blush.vercel.app/) — points at the
+  redeployed production wall.
 - **Ticket transparency:** every ticket so far comes from the deployer wallet (`0x380fbF99…b019`) —
   the first production stamp tx is
   [`0xc6341f2e…09269b36`](https://robin.etherscan.io/tx/0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36)
@@ -73,9 +75,13 @@ lives on **Base** (8453) and ships every epoch's winning word back over **Chainl
    `deliver(epoch)` for liveness after a top-up; **anyone** → `receive()` to fund CCIP fees.
    Nobody can set the wall, the coordinator, the key hash, or the subscription after deploy —
    they are `immutable`.
-4. **First-word-wins duplicate protection.** If a retried settlement arrives after the word is
-   already known, the relay immediately `_deliver`s the cached word instead of requesting VRF
-   again — no double burn, no double fee, no second source of truth.
+4. **First-word-wins duplicate protection — with an honest limit.** If a retried settlement
+   arrives while the word is known but never been handed to the router, the relay `deliver`s the
+   cached word instead of paying for a fresh VRF request. Once a reply *has* been handed to the
+   router (`delivered[epoch] = true`), the relay stays deliberately silent: the wall's 1-day
+   re-request then cannot recover a stuck reply and only burns the caller's fee (audit finding
+   #1). Recovery in that case is the CCIP-Explorer manual execution of the original message
+   (§6), which is safe because the wall rejects duplicates with `EpochAlreadySettled`.
 5. **Two independent funding rails.** VRF is paid from a **native-ETH** subscription (no LINK
    dependency), CCIP reply fees from relay ETH; each can be topped by anyone, neither can be
    misused by anyone.
@@ -83,7 +89,7 @@ lives on **Base** (8453) and ships every epoch's winning word back over **Chainl
 ### `contracts/testnet/IMDRetroWallShortEpoch.sol`
 Same bytecode-level logic with `EPOCH_DURATION = 10 minutes`, used for the live cross-chain
 rehearsal described in §6 — the reason the whole path could be tested on mainnet without
-waiting 7 days.
+waiting a production-length epoch.
 
 ### `contracts/mocks/` + `contracts/interfaces/`
 `MockCCIPRouter` and `MockVRFCoordinator` implement the exact interfaces the real networks
@@ -153,6 +159,13 @@ pair was redeployed fresh (2026-10-16): the orphaned old-wall epoch-1 pool (500 
 single stamp there) is stranded inside the superseded wall — it has no sweep function and is
 disclosed here rather than hidden. v2/v1 remain for history only; v2 notes do not migrate to v3.
 
+**Epoch-length discrepancy in the source comments (audit #7):** the NatSpec/header comments of
+the explorer-verified wall source still say *7 days*, but the deployed constant is **3 days** —
+read from the chain: `EPOCH_DURATION() = 259200 s`, `GENESIS = 1792124930`. Always trust the
+on-chain constant: epoch 1 ends **2026-10-19 04:28:50 UTC**, not the NatSpec implied date.
+The contract files are frozen for this submission; the discrepancy is documented rather than
+edited.
+
 External infrastructure:
 
 | Item | Robinhood Chain | Base |
@@ -161,6 +174,14 @@ External infrastructure:
 | CCIP chain selector | `6180753054346818345` | `15971525489660198786` |
 | VRF v2.5 coordinator | — | `0xd5D517aBE5cF79B7e95eC98dB0f0277788aFF634` |
 | VRF key hash | — | 2 gwei `0x00b81b5a…`; 30 gwei `0xdc2f8767…` |
+
+**Explorer source-verification status (read from the explorers 2026-10-16 07:13 UTC):**
+Basescan still shows the production relay **`Contract: Unverified`**; the RobinScan page is not
+machine-readable from this repo's tooling (treat it as unverified until confirmed). The
+Standard-JSON inputs are prepared and committed under `verification/` and are byte-for-byte
+the input of the deployed pair — upload them (wall → RobinScan, relay → Basescan) before
+submission so both pages read "Source Code Verified / Exact Match". Our own byte-level proof
+(§3 evidence table) already equals the deployed bytecode.
 
 Funding at deploy (2026-10-16 pair): VRF subscription **0.0008 ETH** (native, sub id
 `51441836222580451052993458818119349024779142164800689033215217746100047214776`, consumer = the
@@ -189,8 +210,15 @@ VrfCcipRelay.deliver  ◀──── rawFulfillRandomWords ──┘
 ```
 
 Failure handling: no tickets → `WinnerDrawn(epoch,0,0,0)`; relay ETH low → the word is kept and
-anyone re-delivers after top-up; lost message → re-request after 1 day; the VRF word is stored
+anyone re-delivers after top-up (`deliver(epoch)` is permissionless); VRF word known but the
+reply leg stuck → `deliver(epoch)` on Base if not yet delivered, otherwise **CCIP Explorer
+manual execution** of the original reply message — never a re-request inside the pending window
+(audit #1/#4); VRF word not yet known → wait for Chainlink fulfillment. The VRF word is stored
 in `WinnerDrawn` so every draw remains independently auditable forever.
+
+> **The relay does NOT forward the word automatically.** After `rawFulfillRandomWords` records
+> it, exactly one explicit action moves it: someone must call `deliver(epoch)` on Base, or the
+> wall must execute an accepted CCIP message. The exact end-to-end sequence is documented in §6.
 
 ---
 
@@ -208,7 +236,11 @@ in `WinnerDrawn` so every draw remains independently auditable forever.
 
 Accepted trade-offs: sybil is cost-linear (1000 NOTES per ticket), settlement is pull-based,
 direct token transfers to the wall are untracked and unrecoverable, and a stalled
-CCIP/VRF leg *delays* (never destroys) a prize — the epoch stays Requested and retryable.
+CCIP/VRF leg *delays* a prize — the epoch stays Requested and recovery is a manual,
+permissionless `deliver()` on Base or a CCIP-Explorer manual execution, **never** a second
+`requestSettlement` inside the 1-day retry window (that path costs the caller its fee and does
+not move the word, §6 + audit #1). If no recovery step is taken, the prize stays locked (no
+sweep) — §10 lists the recovery and liveness trust assumptions in full.
 
 ---
 
@@ -286,16 +318,30 @@ failure modes of *both* integration layers:
   during the same window, fulfillments kept succeeding for a handful of long-running
   subscriptions at 1–2 block delays.
 
-Consequences for this project: the pending requests carry **no on-chain timeout and no cost**;
-when the fulfiller picks them up, the relay forwards the word automatically with its existing
-CCIP ETH balance and the wall settles (`WinnerDrawn`). The production paths are:
+Consequences for this project: fulfillment on a pending request carries **no on-chain timeout
+and no cost**, but it also does **not** auto-settle anything — the relay only records the word.
+The exact 4-step production sequence (`scripts/settle-prod.ts` implements 1–3; step 4 happens
+on the winner's wallet):
 
-1. **Wait/switch VRF fulfillment** — fund with LINK instead of native, or a lane/tier the
-   Base fulfiller actually serves; confirm in the Chainlink sub manager and/or support.
-2. **Second independent randomness source** (drand/commit–reveal) used only if VRF stalls
-   beyond a deadline — keeping the VRF word as the primary source and the failure path honest.
-3. **Keep the relay neutral** in both cases: first-word-wins per epoch remains valid no matter
-   which source satisfies it (or it should be re-deployed with its own fresh-wall pair).
+1. **`requestSettlement(1)`** — once, paying the quoted CCIP fee. NEVER re-request while
+   pending: inside `SETTLEMENT_RETRY_DELAY` (1 day) the wall reverts `SettlementPending`, and
+   after that window a re-request spawns an **additional paid VRF request** for the same epoch
+   (audit #4) — the first word wins and the extra one drains the subscription.
+2. **Wait for `relay.randomnessReady(1)` = true** — Chainlink's fulfiller lane does the work;
+   multi-hour stalls are observed (fulfiller selection, not our plumbing).
+3. **`relay.deliver(1)` on Base** — a separate, permissionless transaction anyone can send
+   (gas from the sender, the CCIP reply fee from the relay's own ETH balance). The settlement
+   script sends it automatically once the word is ready; `deliver()` alone was missing from the
+   original tooling (audit #6).
+4. **`WinnerDrawn` lands on the wall; the winner calls `claimReward()`** themselves.
+
+Fallback for a stuck reply leg: if `relay.delivered(1)` is already true while the wall remains
+`Requested`, the reply message was handed to the router but never executed on the wall. Finish
+it via **CCIP Explorer** (`https://ccip.chain.link`): open the Base→Robinhood message
+(`RandomnessDelivered` carries the messageId), press **Manually Execute**. Re-execution is safe
+— the wall rejects a duplicate word with `EpochAlreadySettled`. Do **not** `requestSettlement`
+again for a stuck-but-delivered epoch (audit #1: the relay's retry branch is a silent no-op
+then; only off-contract manual execution completes it).
 
 ---
 
@@ -374,4 +420,49 @@ The v2-era leaderboard and manual settlement functions no longer exist.
 | Stamp reverts with `StampLimitReached` | The address already has 5 stamps in this epoch. |
 | `requestSettlement` reverts `RelayNotSet` | `setRelay` (step 3) has not run. |
 | `requestSettlement` reverts `SettlementPending` | A request is in flight. Wait for `SETTLEMENT_RETRY_DELAY` (1 day). |
-| Epoch stuck in Requested | Check relay ETH balance (`InsufficientBalance`) and VRF subscription balance; top up. See §6 for the fulfiller-stall case. |
+| Epoch stuck in Requested | Check relay ETH balance (`InsufficientBalance`) and VRF subscription balance; top up. Then §6: `deliver(1)` on Base when the word is ready, or CCIP Explorer for a stuck reply. NEVER re-request inside the 1-day window. |
+
+---
+
+## 10 · Audit status (2026-10-16)
+
+The production pair at commit `a5c1af9fc13c8413b508b245a997fdfc2689fa81` was audited by four
+specialized audit agents plus a judge on the IdentityMD network.
+Report: **[AUDIT.md — job 44df6543-f9d6-4f44-9d69-40e0f7223b0c](https://github.com/Identity-md/research/blob/main/jobs/44df6543-f9d6-4f44-9d69-40e0f7223b0c/files/AUDIT.md)** —
+**2 medium, 5 low, 2 info**. Nothing in the report was fixed by editing the deployed contracts
+(they are frozen for this submission); each finding is **acknowledged, not fixed in the
+deployed contracts**, with the operational mitigation below. The earlier audit of the
+superseded `d063100` design remains in §6 as history.
+
+| # | Finding (severity) | Mitigation (operational only) |
+| --- | --- | --- |
+| 1 | Relay never re-sends a cached word once `delivered[epoch]` is set — the wall's 1-day re-request cannot recover a sent-but-unexecuted reply and only burns the caller's fee (medium) | Never re-request a pending epoch. If `delivered(1)=true` and the wall is Requested, finish via CCIP Explorer **Manually Execute** (safe: the wall rejects duplicates with `EpochAlreadySettled`). Documented in §6 and the runbook. |
+| 2 | Settlement liveness depends on the externally-owned VRF subscription and immutable Chainlink parameters — cancelling it, removing the consumer, or a retired lane strands every pool while stamping keeps charging (medium) | Trust assumption (below): the subscription owner is a **trusted liveness role** — must never cancel or remove the consumer; keep the sub funded; monitor lane coverage. No on-chain fix without redeploy. |
+| 3 | `CCIP_GAS_LIMIT = 300_000` leaves the relay's cached-word CCIP branch only ~4.7k gas of headroom (measured 295,318 / 300,000 on the live lane) (low) | If Chainlink's on-ramp cost ever rises above the budget, recovery still works via CCIP Explorer manual execution (off-ramp gas override is caller-side). Watch lane upgrades. |
+| 4 | Re-requests while VRF is pending spawn additional paid VRF requests for the same epoch; only the first word is used and the rest drain the subscription (low) | Hard rule in §4/§6, the runbook, and `scripts/settle-prod.ts`: the script sends `requestSettlement` at most once and never within the retry window; delivery is a separate permissionless `deliver(1)`. |
+| 5 | Wall `ccipReceive` accepts a word for an epoch in state `None`, so a relay-side fault could settle a running epoch and strand later pools (low) | Defense-in-depth gap, accepted: the production relay is bound one-shot to the audited pair (wiring + bytecode verified, §3), only echoes epochs the wall requested. No redeploy for this submission. |
+| 6 | `scripts/settle-prod.ts` and README relied on an automatic word forward the contracts never perform — the script never called `relay.deliver()` (low) | Mitigation IS this release: the script now polls `randomnessReady(1)`, sends `relay.deliver(1)` on Base once ready, surfaces the messageId + CCIP Explorer fallback, and never re-requests; README §6 and the runbook now state that delivery is an explicit, separate call. |
+| 7 | NatSpec / header / older docs say 7 days while the deployed constant is 3 days, 259200 s (low) | Docs corrected this release (§3, §4, FACTS, ENTRY_RADAR). The contract files stay frozen; the discrepancy is documented and the on-chain constant is authoritative. |
+| 8 | `stampNote` works before `setRelay`, so on a fresh deployment the deployer could pick the randomness source while money is at stake (info) | Deployment hygiene only: `setRelay(0x887bbed7…6eaA)` was executed (one-shot) **before** any production stamping; anyone can read `relay()` before stamping. Accepted for the live pair. |
+| 9 | First-word-wins and `UnknownRequest` branches of `rawFulfillRandomWords` are not exercised by the hardhat suite (info) | Coverage gap documented; behavior verified by the auditors' scratch proofs (later word dropped). Test files intentionally unchanged in this submission. |
+
+**Trust assumptions (read before trusting "ownerless"):**
+
+- The VRF subscription
+  `51441836222580451052993458818119349024779142164800689033215217746100047214776`
+  is owned by the deployer wallet `0x380fbF99A903253E14b9EB797807B4B92cd4b019`. It **must never
+  be cancelled and the relay must never be removed as its consumer** — either action strands
+  every existing and future prize pool with no on-chain recovery (finding #2). The owner's only
+  legitimate operations are top-ups and consumer re-add of the same relay address.
+- Settlement liveness depends on **Chainlink fulfillment**: the wall pays the fee and then waits
+  for the 2-gwei lane fulfiller to pick up the request. Multi-hour stalls were observed on the
+  test pairs (§6); there is no on-chain timeout, cost, or automatic fallback beyond the manual
+  steps in §6.
+- CCIP lanes/routers are immutable per deployment; a stuck reply leg is finished via CCIP
+  Explorer manual execution, not on-chain code (findings #1, #3).
+
+**Current settlement status at submission:** production epoch 1 holds 1 ticket (deployer wallet,
+tx `0xc6341f2e…09269b36`) worth a 500-NOTES pool; `settlementStatus(1) = None`; VRF sub
+`reqCount = 0`; no pending request. First production `requestSettlement` can only be sent after
+epoch 1 ends (**2026-10-19 04:28:50 UTC**).
+

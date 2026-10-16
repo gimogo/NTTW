@@ -1,7 +1,7 @@
 # ENTRY.md — Notes To The World (NTTW)
 
 Notes To The World is a permanent, fully on-chain corkboard where every sticky note is an
-ERC-721 and each weekly prize pool paid from 1000-NOTES stamp fees is settled cross-chain
+ERC-721 and each 3-day-epoch prize pool paid from 1000-NOTES stamp fees is settled cross-chain
 by Chainlink VRF v2.5 delivered over Chainlink CCIP.
 
 How it works:
@@ -13,7 +13,11 @@ How it works:
   IMDRetroWall.sol:134); max 5 tickets per address per epoch (MAX_STAMPS_PER_EPOCH, :137).
 - At epoch end, anyone calls requestSettlement(epoch) and pays the exact CCIP fee; the wall
   forwards one integer (the epoch) to an ownerless VrfCcipRelay on Base, which requests one
-  Chainlink VRF v2.5 word and forwards the first word back over CCIP.
+  Chainlink VRF v2.5 word. The word is NOT forwarded automatically: once the relay records it
+  (randomnessReady(epoch) = true), anyone calls deliver(epoch) on Base (permissionless) to ship
+  it back over CCIP; if the reply leg stalls, CCIP Explorer manual execution finishes it.
+  requestSettlement is NEVER repeated while pending (the wall reverts SettlementPending inside
+  the 1-day window, and a later re-request buys an extra VRF word that is discarded).
 - The wall computes winnerIndex = word % ticketCount (IMDRetroWall.sol:437), stores the raw
   word in WinnerDrawn (auditable forever), and credits the pool pull-based: the winner calls
   claimReward() (:439-451); no tickets settle as WinnerDrawn(epoch,0,0,0).
@@ -34,7 +38,8 @@ Verify it yourself:
 | VrfCcipRelay (production pair, redeployed 2026-10-16) | Base 8453 | https://basescan.org/address/0x887bbed753938087Ce61Ca768a358848177E6eaA |
 | Production `setRelay` wiring tx (one-shot) | Robinhood 4663 | https://robin.etherscan.io/tx/0x3b7bb3b490bbd12fc48496fca55c60b1455a4646f0df5f3af39bd11a2828b928 |
 | **Live production stamp — the first ticket of epoch 1** (all tickets so far come from the deployer wallet) | Robinhood 4663 | https://robin.etherscan.io/tx/0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36 (block 89,837,366; ticket pool = 500 NOTES) |
-| Live app | Robinhood 4663 | TODO — add the deployed frontend URL before submission |
+| Live app (points at the redeployed production wall) | Robinhood 4663 | https://nttw-blush.vercel.app/ |
+| Audit (current pair, commit a5c1af9, 2 medium / 5 low / 2 info — released, see honest status) | — | https://github.com/Identity-md/research/blob/main/jobs/44df6543-f9d6-4f44-9d69-40e0f7223b0c/files/AUDIT.md |
 | Superseded production pair (old wall+relay, shared address; relay lacked ERC-165, can never settle) | both chains | https://robin.etherscan.io/address/0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110 |
 | NOTES token | Robinhood 4663 | https://robin.etherscan.io/token/0x03b76ccf7cfeec5198c81c5844b88a78e68a6173 |
 | Launch tx (V4 Initialize + pool seeding, block 89,350,492) | Robinhood 4663 | https://robin.etherscan.io/tx/0x874397f3de80109a73ca8bae153efb7a9005cb73f8c271055f679b455fdc55f2 |
@@ -42,7 +47,7 @@ Verify it yourself:
 | Live CCIP settlement request (rehearsal on a 10-minute test wall, real mainnet, not the production wall) | Robinhood 4663 | https://robin.etherscan.io/tx/0x1752fa15d11007ad4bcf536ad19d1734783101454990566ff8edded56aaba163 |
 | Live wiring via setRelay (rehearsal on a 10-minute test wall, real mainnet, not the production wall) | Robinhood 4663 | https://robin.etherscan.io/tx/0x55e4072f3d179afcd26165cad4508d02ab77944dd29be089238fb6548973fdd4 |
 | Repo | — | https://github.com/gimogo/NTTW |
-| Audit (earlier design, commit d063100) | — | https://github.com/Identity-md/research/blob/main/jobs/16c65a39-24f4-47d6-a9f5-2140c70791c6/files/AUDIT.md |
+| Audit (earlier design, commit d063100 — kept as history; see the current-pair audit above) | — | https://github.com/Identity-md/research/blob/main/jobs/16c65a39-24f4-47d6-a9f5-2140c70791c6/files/AUDIT.md |
 | IMD Radar submission | — | add link after submission |
 
 Honest status and known limits: the first production pair (deployed 2026-10-15) could never
@@ -55,8 +60,21 @@ the VRF fulfillment stall observed on the test pairs (r2/r4) is Chainlink's off-
 fulfiller selection, not our plumbing — no WinnerDrawn has happened on mainnet yet and no
 prize has been paid. Sybil resistance is cost-linear (1000 NOTES per ticket). Direct token
 transfers to the wall are untracked and unrecoverable. The old wall's 500-NOTES epoch-1 pool
-is permanently stranded (no sweep). The audit covered the superseded top-10-leaderboard
-design at commit d063100; v3 itself has not been re-audited.
+is permanently stranded (no sweep). The earlier audit (d063100) covered the superseded
+top-10-leaderboard design; the current production pair at commit a5c1af9 was audited on
+2026-10-16 (2 medium / 5 low / 2 info): all 9 findings are **acknowledged, not fixed in the
+deployed contracts** (fixing would require a redeploy; contracts are frozen for this
+submission) with operational mitigations in README §10 and the settlement runbook — the
+highest-impact ones being: a stuck reply leg is finished with CCIP Explorer manual execution,
+never a paid re-request; and the VRF subscription (owned by the deployer wallet) must never
+be cancelled or lose the relay as consumer, or every prize pool strands — settlement liveness
+depends on Chainlink fulfillment. Source-of-truth for epoch length is the on-chain constant
+(EPOCH_DURATION = 259200 s = 3 days); the verified contract source NatSpec still says 7 days.
+Explorer source verification of the new pair is still pending upload (Basescan showed the
+relay Unverified as of 2026-10-16 07:13 UTC; Standard-JSON inputs are committed under
+verification/). Epoch 1 currently holds exactly 1 ticket and a 500-NOTES pool with
+settlementStatus(1) = None; the first production requestSettlement can only be sent after the
+epoch ends 2026-10-19 04:28:50 UTC.
 
 Links: repo https://github.com/gimogo/NTTW — X https://x.com/NotestotheW
 (@NotestotheW) — IMD Radar: add link after submission.

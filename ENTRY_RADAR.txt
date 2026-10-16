@@ -1,5 +1,5 @@
-NOTES To The World: an on-chain corkboard where every sticky note is an ERC-721 and its prize pool is settled cross-chain by Chainlink VRF v2.5.
-A stamp costs 1000 NOTES: 500 burned, 500 pooled; stamps are epoch tickets (3 days on production). Anyone can settle at epoch end for the CCIP fee; the ownerless VrfCcipRelay (Base) requests one VRF word and returns it; the wall computes winner = word % ticketCount and pays via claimReward().
-Custom: IMDRetroWall ERC-721 wall (Robinhood 4663), VrfCcipRelay (Base). NOTES launched via the IMD Protocol as a Uniswap V4 NOTES/IMD pool; its guard hook is IMD's, not ours.
-Honest: the first production relay lacked ERC-165, so CCIP silenced its messages; redeployed 2026-10-16, ERC-165 verified on-chain. CCIP wall-to-relay ran live on mainnets (test-wall rehearsal); VRF pending on Chainlink's side - no WinnerDrawn yet. IMD audit covered the earlier leaderboard design (d063100); v3 not re-audited.
+NOTES To The World (nttw-blush.vercel.app): every sticky note is an ERC-721; prizes settle cross-chain via Chainlink VRF v2.5.
+A stamp costs 1000 NOTES (500 burn / 500 pool) and is a 3-day-epoch ticket. Anyone settles an ended epoch for the CCIP fee; the ownerless VrfCcipRelay (Base) requests a VRF word; anyone then calls deliver(epoch) to ship it; winner = word % ticketCount via claimReward().
+Custom: IMDRetroWall (Robinhood 4663); NOTES launched via the IMD Protocol (Uniswap V4).
+Honest: the first relay lacked ERC-165 so CCIP dropped its messages; redeployed 2026-10-16 with ERC-165 verified on-chain. Wall-to-relay CCIP proved live on mainnets; no WinnerDrawn yet - VRF fulfillment pending on Chainlink. Audited at a5c1af9 (2 med, 5 low, 2 info): all 9 acknowledged, not fixed in the deployed contracts; mitigations operational - never re-request once pending; recover via deliver/CCIP Explorer; never cancel the deployer-owned VRF sub.
 Repo: github.com/gimogo/NTTW - X: @NotestotheW

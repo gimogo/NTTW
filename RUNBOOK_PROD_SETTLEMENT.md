@@ -55,22 +55,36 @@ Funding targets at the time of writing (per observed rehearsal costs):
 ## T-0 — settle epoch 1 (2026-10-19, any time after 04:28:50 UTC)
 
 Runner: `scripts/settle-prod.ts` (preflights included; aborts before sending if any check fails).
+Dry-run first (read-only, sends nothing):
 
 ```bash
 cd /home && export TS_NODE_PROJECT=tsconfig.hardhat.json
+# read-only preflight + fee quote (no transaction billing):
+SETTLE_DRY_RUN=1 npx hardhat run scripts/settle-prod.ts --network robinhood
+# the real one:
 PROD_WALL_ADDRESS=0x9550E4F888d1C084CB1C8E74677Da54109723EE3 \
 PROD_RELAY_ADDRESS=0x887bbed753938087Ce61Ca768a358848177E6eaA \
 npx hardhat run scripts/settle-prod.ts --network robinhood 2>&1 | tee /tmp/prod-settle.log
 ```
 
-What it does, in order:
+The exact sequence it runs (each step is a separate on-chain action — nothing is automatic;
+audit #6 fixed in tooling, not on-chain):
 1. Preflight wiring both ways + relay ERC-165 capability (FATAL abort if stale).
-2. Waits for `currentEpoch() >= 2` (epoch 1 truly ended).
-3. Reads the exact CCIP fee via the `InsufficientFee` revert of a zero-value `staticCall`
-   (no oracle, no off-chain quoting).
-4. Sends `requestSettlement(1)` paying exactly the quoted fee (excess is refunded by the wall).
-5. Monitors both chains for up to 24 h: relay `RandomnessRequested`/`randomnessReady(1)`/
-   `delivered(1)`, then `WinnerDrawn` on the wall. Prints every state change with timestamps.
+2. Waits for `currentEpoch() >= 2` (epoch 1 truly ended) — skipped in `SETTLE_DRY_RUN=1`.
+3. `requestSettlement(1)` — sends it **at most once**, paying exactly the quoted fee. If the
+   epoch is already `Requested`, it does NOT re-send (see the hard rule below).
+4. Polls `relay.randomnessReady(1)` on Base (the word is only recorded; nothing forwards
+   itself).
+5. Once ready and `delivered(1)==false`, it sends **`relay.deliver(1)` on Base** —
+   permissionless; gas from the deployer wallet, the CCIP reply fee from the relay's ETH
+   balance.
+6. Watches `WinnerDrawn` on the wall; the winner then calls `claimReward()` themselves.
+
+**Hard rule (audits #1 and #4):** `requestSettlement(1)` is sent ONCE per epoch and never
+inside the 1-day retry window while a request is pending — inside the window the wall reverts
+`SettlementPending`, and after the window a re-request spawns an **additional paid VRF request**
+for the same epoch whose word is discarded. Recovery is `deliver(1)` or CCIP Explorer
+manual execution, never a second request.
 
 ## After WinnerDrawn
 
@@ -85,8 +99,10 @@ What it does, in order:
 | `requestSettlement` reverts `RelayNotSet` | wiring broken | `setRelay` already used (tx `0x3b7bb3b4…2828b928`); a mismatch means the wrong wall address — stop. |
 | `SettlementPending` before 2026-10-20 04:28:51 UTC | 1-day retry guard (only applies if the first request lands) | wait for `settlementRequestedAt(1) + 1 day`. |
 | Message marked SUCCESS in CCIP but no `RandomnessRequested` on the relay | silent token-only conversion (stale relay) | abort; verify you are on relay `0x887bbed7…6eaA`, not the superseded pair. |
+| `RandomnessReady(1)=true` but `delivered(1)=false` | nothing calls `deliver` — word never ships by itself | script sends `relay.deliver(1)` on Base once ready; anyone can send it too (permissionless). |
+| `delivered(1)=true` but wall stays `Requested` | reply leg was sent but never executed on the wall | CCIP Explorer → paste the `RandomnessDelivered` messageId → **Manually Execute** the Base→Robinhood message (safe: a duplicate word is rejected by `EpochAlreadySettled`). NEVER re-request while pending — the relay's retry branch is a silent no-op then and the fee is burned (audit #1). |
 | Word arrives but wall says `InsufficientBalance` on deliver | relay ETH spent | top up relay; relay's `deliver(1)` is permissionless. |
-| VRF fulfillment stalls (long) | Chainlink fulfiller selection | keep the requestIds + support ticket text (prepared 2026-10-16, test pairs r2/r4 evidence) and retry after `SETTLEMENT_RETRY_DELAY = 1 day`. |
+| VRF fulfillment stalls (long) | Chainlink fulfiller selection | keep the requestIds + support ticket text (prepared 2026-10-16, test pairs r2/r4 evidence). **No re-request while pending** — wait and deliver manually once the word lands (after a pending request, a re-request even outside the window spawns an extra paid VRF request, audit #4). |
 
 ## Do-not-execute notice
 
