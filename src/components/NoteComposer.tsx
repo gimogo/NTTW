@@ -93,7 +93,9 @@ export default function NoteComposer({
   } = useWaitForTransactionReceipt({ hash: txHash });
 
   const trimmed = content.trim();
-  const overLimit = trimmed.length > MAX_CONTENT_LENGTH;
+  // The contract limits content in UTF-8 BYTES (audit #7), not characters.
+  const contentBytes = new TextEncoder().encode(trimmed).length;
+  const overLimit = contentBytes > MAX_CONTENT_LENGTH;
   const canStamp =
     trimmed.length > 0 &&
     !overLimit &&
@@ -152,7 +154,7 @@ export default function NoteComposer({
   let status = "";
   let tone = STATUS_TONE.idle;
   if (overLimit) {
-    status = `TOO LONG — ${trimmed.length}/${MAX_CONTENT_LENGTH} CHARS`;
+    status = `TOO LONG — ${contentBytes}/${MAX_CONTENT_LENGTH} BYTES`;
     tone = STATUS_TONE.error;
   } else if (!contractAddress) {
     status = "CONTRACT NOT SET — ADD NEXT_PUBLIC_NOTES_CONTRACT_ADDRESS";
@@ -224,12 +226,12 @@ export default function NoteComposer({
                 <label htmlFor="note-content">YOUR MESSAGE</label>
                 <span
                   className={
-                    trimmed.length > 240
+                    contentBytes > 240
                       ? "text-amber-700"
                       : "text-ink/50"
                   }
                 >
-                  {trimmed.length}/{MAX_CONTENT_LENGTH}
+                  {contentBytes}/{MAX_CONTENT_LENGTH} B
                 </span>
               </div>
               <textarea

@@ -36,6 +36,12 @@ const config: HardhatUserConfig = {
       chainId: 4663,
       accounts,
     },
+    // Base mainnet — VRF v2.5 coordinator + CCIP relay (chain id 8453).
+    base: {
+      url: process.env.BASE_RPC_URL || "https://mainnet.base.org",
+      chainId: 8453,
+      accounts,
+    },
     baseSepolia: {
       url: process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org",
       chainId: 84532,

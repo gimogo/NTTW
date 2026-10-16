@@ -1,284 +1,284 @@
-# 📌 Notes To The World
+# 📌 Notes To The World (NTTW)
 
-A **decentralized, permanent sticky-note corkboard** for **Robinhood Chain** (mainnet) and **Base Sepolia** (testnet).
-Every note is a real on-chain `string` — 280 characters max — pinned to an X/Y spot on a
-tactile retro cork wall, **and minted as a unique ERC-721 NFT** to its author.
-Notes overlap like real paper: newer notes stack on top, and hovering peels the top note
-back to hint at what's buried underneath.
+**A permanent, fully on-chain corkboard — where every sticky note is an ERC-721 — whose weekly
+prize pool is settled cross-chain by Chainlink CCIP + VRF.**
 
-Stamping is **paid on-chain** in the project token: every stamp charges **1000 NOTES**,
-of which **500 are burned** and **500 accrue to a weekly reward pool** that is split across
-the **top 10 stampers of the week** — enforced atomically in the same transaction.
+Live on **two chains at once**: notes live on **Robinhood Chain** (4663); the randomness engine
+lives on **Base** (8453) and ships every epoch's winning word back over **Chainlink CCIP**.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  📌 NOTES [TO THE] WORLD                     0x1234...abcd  │
-├─────────────────────────────────────────────────────────────┤
-│   ╭──────╮          ╭────────╮                              │
-│   │ gm 🧡│   ╭──────│ wagmi  │╮     ← overlapping pastel    │
-│   ╰──╥───╯   │ n.2  ╰────────╯│       sticky notes with     │
-│      ║   ╭───╰────╮  ╭─────╮  │       random tilt, pins &   │
-│      ║   │ stack! │  │build│  │       washi tape             │
-│      ╰───╰────────╯  ╰─────╯──╯                             │
-│                                                             │
-│   [ scrollable 3200×2200 cork canvas · z-index = note id ]  │
-└─────────────────────────────────────────────────────────────┘
-                                  [+ Sticky Note] ← FAB
-```
+- Every stamped note is a real on-chain `string` (≤280 bytes, validated UTF-8) — no IPFS.
+- Every stamp costs **1000 NOTES**: **500 burned** to `0x…dEaD`, **500 pooled** for that epoch.
+- Every stamp is a lottery ticket. When the 7-day epoch ends, the pool is paid to **one**
+  winner, chosen by a **Chainlink VRF v2.5** word that crosses the chain boundary via CCIP.
+
+> Live status: both contracts deployed and wired; CCIP is verified two-way live on mainnets;
+> the VRF request path is exercised live and currently pending on Chainlink's fulfiller —
+> details in §6 (Verification & live tests).
 
 ---
 
-## 1 · Tech stack
+## 1 · Why it's different
 
-| Layer        | Tech                                                              |
-| ------------ | ----------------------------------------------------------------- |
-| Smart chain  | **Robinhood Chain** mainnet (+ **Base Sepolia** testnet)          |
-| Contract     | Solidity `0.8.20` (optimizer 200, EVM **paris**), **ERC-721**      |
-| Payment      | **NOTES** ERC-20 (`0x03b7…6173`): 1000/stamp → 500 burned + 500 to weekly pool |
-| Contract env | Hardhat 2 + hardhat-ethers + hardhat-chai-matchers                 |
-| Frontend     | Next.js 14 (App Router), React 18, Tailwind CSS 3                 |
-| Web3         | wagmi 2 + viem 2 (+ optional WalletConnect), TanStack Query 5     |
-| Animation    | Framer Motion 11 (drag, hover peel, entrances) + Lucide icons     |
-| Type/fonts   | TypeScript 5, Google Fonts **Caveat** (notes) + **VT323** (UI)    |
+| Problem in typical on-chain lotteries | NTTW answer |
+| --- | --- |
+| Randomness from blockhash (miner-controllable) | Verifiable VRF v2.5 word, request made by an **ownerless relay**, not the game contract |
+| Off-chain files pretend to be on-chain | Notes are stored **in the ERC-721 itself**; the NFT *is* the note |
+| Admin keys everywhere | Admin surface is **one call, globally**: `setRelay()`, once. After that: no owner, no pause, no upgrades |
+| Prize logic duplicated across chains | No logic crosses the chain — only **one integer**: the raw `randomWord`. The wall derives the winner alone |
+| "It works in our tests" | Cross-chain behavior was debugged **live against real Chainlink networks** and each failure mode is documented (§6) |
 
 ---
 
-## 2 · Project structure
+## 2 · Contract-by-contract: what makes each one unique
 
-```
-contracts/
-  IMDRetroWall.sol              # the immutable notes wall + ERC-721 minting + paid stamping
-scripts/deploy.ts               # deploy script (prints env hint)
-test/IMDRetroWall.ts            # hardhat tests (validation, events, pagination, payments)
-hardhat.config.ts               # 0.8.20 / optimizer / Robinhood Chain + Base Sepolia
-tsconfig.hardhat.json           # CommonJS tsconfig for hardhat scripts + tests
-next.config.mjs                 # webpack aliases (stubs optional WalletConnect QR chain)
-.env.example                    # env template
-src/
-  app/
-    layout.tsx                  # fonts (Caveat + VT323), metadata, providers
-    page.tsx                    # board page (client-only dynamic import)
-    globals.css                 # cork texture, dot grid, retro components
-  components/
-    Providers.tsx               # WagmiProvider + QueryClientProvider
-    Header.tsx                  # retro title plate + note counter + chain
-    WalletButton.tsx            # Connect Wallet / truncated address / menu
-    Board.tsx                   # scrollable cork canvas + drag-to-place ghost
-    StickyNote.tsx              # tilt, pin/washi-tape, hover peel, z-index
-    NoteComposer.tsx            # 280-char editor, colors, reroll, approve + paid stamp tx
-  hooks/useNotes.ts             # paginated reads + live NoteCreated stream
-  lib/
-    wagmi.ts                    # chains (Robinhood Chain, Base Sepolia), connectors
-    contract.ts                 # ABI, payment constants, address from env
-    board.ts                    # board constants, palette, helpers, demo notes
-```
+### `IMDRetroWall.sol` — the wall (Robinhood Chain, ERC-721)
+1. **Notes are first-class on-chain data.** Minted as ERC-721 tokens whose content lives in
+   contract storage, pinned to an X/Y cell of a virtual cork canvas.
+2. **Epoch ledger with a real fee market.** `requestSettlement(epoch)` is payable and pays the
+   *quoted* CCIP fee; overpayment is returned in one transaction. The fee is discovered from the
+   `InsufficientFee` revert — no off-chain quoting needed, no fee oracle.
+3. **Three-lock cross-chain receive.** `ccipReceive` verifies (a) `msg.sender == CCIP router`,
+   (b) `sourceChainSelector == Base selector`, (c) decoded sender `== relay`. Forged, replayed
+   or wrong-lane messages revert.
+4. **Deliberately minimal admin surface.** `setRelay()` is callable **exactly once** by the
+   deployer (emits `RelaySet`). After that the contract is immutable: no owner, no pause, no
+   upgrade path, no reroll. Omnipotence was traded away on purpose.
+5. **Failure is legible, not silent.** Empty epochs settle with `WinnerDrawn(epoch, 0, 0, 0)`;
+   lost CCIP messages are retried after `SETTLEMENT_RETRY_DELAY = 1 day`; settled epochs can
+   never be re-requested (`SettlementStatus.Requested/Settled` machine).
+6. **Honest economics, no hidden rake.** 50% burn + 50% pool, `MAX_STAMPS_PER_EPOCH = 5`,
+   `winnerIndex = randomWord % ticketCount` computed deterministically from the public word
+   stored in the event.
 
----
+### `VrfCcipRelay.sol` — the relay (Base)
+1. **State-neutral by design.** It never selects, filters, or bias-checks anything: it maps
+   `epoch → first random word that arrives`, forwards it, and forgets. All winner logic stays
+   on the wall — so even a broken/rotten relay cannot change *who wins*, only *when*.
+2. **The ERC-165 claim that makes CCIP actually work.** The CCIP off-ramp probes
+   `supportsInterface(IAny2EVMMessageReceiver)` and, if it reverts or returns false, silently
+   treats the message as a token-only transfer — dropping the payload while still marking the
+   message SUCCESS. Claiming the interface here is **load-bearing**, and this exact failure was
+   reproduced and fixed live (§6).
+3. **Who-can-do-what is exhaustively enumerable:** VRF coordinator → `rawFulfillRandomWords`;
+   CCIP router → `ccipReceive` (with chain + sender + epoch validation); **anyone** →
+   `deliver(epoch)` for liveness after a top-up; **anyone** → `receive()` to fund CCIP fees.
+   Nobody can set the wall, the coordinator, the key hash, or the subscription after deploy —
+   they are `immutable`.
+4. **First-word-wins duplicate protection.** If a retried settlement arrives after the word is
+   already known, the relay immediately `_deliver`s the cached word instead of requesting VRF
+   again — no double burn, no double fee, no second source of truth.
+5. **Two independent funding rails.** VRF is paid from a **native-ETH** subscription (no LINK
+   dependency), CCIP reply fees from relay ETH; each can be topped by anyone, neither can be
+   misused by anyone.
 
-## 3 · Smart contract
+### `contracts/testnet/IMDRetroWallShortEpoch.sol`
+Same bytecode-level logic with `EPOCH_DURATION = 10 minutes`, used for the live cross-chain
+rehearsal described in §6 — the reason the whole path could be tested on mainnet without
+waiting 7 days.
 
-`contracts/IMDRetroWall.sol` — ownerless, immutable, no upgradability, **ERC-721**:
-
-```solidity
-struct Note {
-    uint256 id;
-    address author;
-    string  content;   // 1..280 bytes
-    string  color;     // "#RRGGBB"
-    uint16  posX;      // 0..65535 virtual canvas
-    uint16  posY;
-    int8    rotation;  // -15..15 degrees
-    uint256 timestamp;
-}
-
-Note[] public allNotes;
-
-function stampNote(string calldata _content, string calldata _color,
-                   uint16 _posX, uint16 _posY, int8 _rotation)
-                   external returns (uint256);
-                   // + burn 500 NOTES + accrue 500 NOTES to weeklyRewardPool
-                   // + update noteCountPerEpoch + leaderboard
-                   // + mint ERC-721 + NoteCreated
-function getTotalNotes() external view returns (uint256);
-function noteCountPerEpoch(uint256 epoch, address author) external view returns (uint256);
-function currentTopMinters(uint256 index) external view returns (address);
-function weeklyRewardPool() external view returns (uint256);
-function currentEpoch() external view returns (uint256);
-function getNotes(uint256 offset, uint256 limit) external view returns (Note[] memory);
-function getNote(uint256 id) external view returns (Note memory);
-function tokenURI(uint256 tokenId) public view returns (string memory); // on-chain JSON
-```
-
-**Note-as-an-NFT**: `stampNote` mints a unique ERC-721 (`IMDNOTE`) token to `msg.sender`,
-with the token id equal to the note id. `tokenURI` returns an on-chain `data:` JSON
-with author, color, position, rotation and timestamp — no off-chain metadata server needed.
-
-L2-optimized: custom errors instead of revert strings, `unchecked` counter loops,
-paginated reads so the frontend never pulls the whole array in one `eth_call`, and a
-`NoteCreated` event carrying the full payload so listeners render in real time with
-zero extra reads.
-
-### Payment (per stamp)
-
-Stamps are paid **entirely in the project ERC-20** — there is no ETH involved
-(`stampNote` is nonpayable):
-
-| Constant                  | Value | Meaning                                                     |
-| ------------------------- | ----- | ----------------------------------------------------------- |
-| `PAYMENT_TOKEN`           | set in the `constructor` | Any standard ERC-20 (immutable after deploy) — must have code on the chain |
-| `TOKEN_FEE`               | `1000 NOTES` (`1000e18`) | Total fee pulled via `transferFrom` (needs a prior `approve`) |
-| `TOKEN_FEE_BURN_SHARE`    | `500 NOTES` (`500e18`) | Pulled straight to `TOKEN_BURN` — destroyed in the same transfer |
-| `TOKEN_FEE_POOL_SHARE`    | `500 NOTES` (`500e18`) | Pulled into the contract and added to `weeklyRewardPool`   |
-| `TOKEN_BURN`              | `0x0000…dEaD` | The dead address the burn share is destroyed at           |
-
-The fee is **mandatory and atomic**: missing allowance/balance → ERC-20 revert surfaced
-as the `TokenTransferFailed` path. All constants are hard `constant`s — changing them
-requires deploying a new contract (that is the point: no admin, no owner).
-
-### Weekly reward economy — 7-day epochs & top-10 leaderboard
-
-Time is split into **7-day epochs** (`EPOCH_DURATION = 7 days`). Every stamp counts
-into the current epoch's per-author tally (`noteCountPerEpoch[epoch][author]`) and keeps
-a **live top-10 leaderboard** (`currentTopMinters`) sorted on-the-fly with a bounded
-insertion sort (max 10 slots, no off-chain indexer). A tie is broken in favor of whoever
-reached that count **first** — the earlier stayer keeps the higher rank.
-
-The **first stamp after an epoch boundary** rolls the epoch over and distributes the
-accrued `weeklyRewardPool` to the top 10 by rank:
-
-| Rank      | Share | | Rank      | Share |
-| --------- | ----- |-| --------- | ----- |
-| 1st       | **30%** | | 5th       | **8%**  |
-| 2nd       | **15%** | | 6th       | **8%**  |
-| 3rd       | **15%** | | 7th       | **4%**  |
-| 4th       | **8%**  | | 8th–10th  | **4%** each |
-
-Empty leaderboard slots are **skipped**; their undistributed share stays in the
-contract and **rolls over** into the next epoch's pool. The rollover emits a
-`RewardPaid` event per winner plus a single `EpochAdvanced(previousEpoch,
-newEpoch, distributed, rolledOverPool)`. Distribution is enforced **entirely
-on-chain** — no admin key, no off-chain payout runner.
-
-### Live deployment (Robinhood Chain mainnet, chain 4663)
-
-| Artifact   | Address / hash | Example tx |
-| ----------- | -------------- | ---------- |
-| Payment token — **NOTES** (ERC-20, 18 decimals) | `0x03b76ccf7cfeec5198c81c5844b88a78e68a6173` | — |
-| **IMDRetroWall** (ERC-721 wall, fee = 1000 NOTES) | `0x515F8f72B62e22c957D34Ba87b312133eFcAC939` | deploy tx `0xe611b6eff706a1b2f0235e7c6177e1b5033ecff921dff7ef184b2eeed55958ed` |
-
-Verify on-chain reads straight from RPC: `PAYMENT_TOKEN` should resolve to the
-NOTES address and `TOKEN_FEE` to `1000e18`.
+### `contracts/mocks/` + `contracts/interfaces/`
+`MockCCIPRouter` and `MockVRFCoordinator` implement the exact interfaces the real networks
+use, so the hardhat suite exercises the *actual* CCIP/VRF interaction shapes (22 tests:
+validation, stamp accounting, tickets and caps, CCIP send/receive paths, settlement and claims).
+The Chainlink interfaces are minimal local copies — the full `@chainlink/contracts` package
+pulls a git dependency pnpm blocks here, and the surface actually used is deliberately ~3
+functions wide.
 
 ---
 
-## 4 · Setup — step by step
 
-### 4.1 Install
+## 3 · Deployments (v3, verify-checked)
+
+| Artifact | Chain | Address |
+| --- | --- | --- |
+| **IMDRetroWall v3** (wall, ERC-721) | Robinhood Chain (4663) | `0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110` |
+| **VrfCcipRelay** (relay) | Base (8453) | `0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110` |
+| NOTES payment token (existing ERC-20) | Robinhood Chain | `0x03b76ccf7cfeec5198c81c5844b88a78e68a6173` |
+| IMDRetroWall v2 (superseded, separate state) | Robinhood Chain | `0x69A8143ecF33527FA8dBD2102AfCE5DE3B210BbE` |
+| IMDRetroWall v1 (superseded) | Robinhood Chain | `0x515F8f72B62e22c957D34Ba87b312133eFcAC939` |
+
+Both v3 contracts share one address. This is a CREATE-address coincidence (same deployer and
+nonce on both chains), not a shared contract — `scripts/status.ts` reads code + wiring on each
+chain independently. v2/v1 remain for history only; v2 notes do not migrate to v3.
+
+External infrastructure:
+
+| Item | Robinhood Chain | Base |
+| --- | --- | --- |
+| CCIP router | `0x06fC836cf9839B1cd891C440A0a45242DA6Ae1c9` | `0x881e3A65B4d4a04dD529061dd0071cf975F58bCD` |
+| CCIP chain selector | `6180753054346818345` | `15971525489660198786` |
+| VRF v2.5 coordinator | — | `0xd5D517aBE5cF79B7e95eC98dB0f0277788aFF634` |
+| VRF key hash | — | 2 gwei `0x00b81b5a…`; 30 gwei `0xdc2f8767…` |
+
+Funding at deploy: VRF subscription **0.0002 ETH** (native), relay **0.0002 ETH** for CCIP reply
+fees — deliberately small; top up before depending on settlements (§5 readback:
+`TS_NODE_PROJECT=tsconfig.hardhat.json npx hardhat run scripts/status.ts --network robinhood`).
+
+---
+
+## 4 · How an epoch settles (end to end)
+
+```
+Robinhood Chain                                    Base
+────────────────────                               ───────────────────────
+requestSettlement(epoch)  ── CCIP (300k gas) ──▶  VrfCcipRelay.ccipReceive
+pay quoted fee (refund excess)                     └▶ VRF v2.5 requestRandomWords
+                                                     native payment, 1 word
+                                                   …… Chainlink fulfiller …
+VrfCcipRelay.deliver  ◀──── rawFulfillRandomWords ──┘
+  (anyone can call)                                   epoch→word, first-wins
+        │
+        └── CCIP (300k gas) ──▶ wall.ccipReceive
+                                 winnerIndex = word % ticketCount(epoch)
+                                 prize credited, WinnerDrawn(…, randomWord)
+                                 winner claims with claimReward()
+```
+
+Failure handling: no tickets → `WinnerDrawn(epoch,0,0,0)`; relay ETH low → the word is kept and
+anyone re-delivers after top-up; lost message → re-request after 1 day; the VRF word is stored
+in `WinnerDrawn` so every draw remains independently auditable forever.
+
+---
+
+## 5 · Trust model and known limitations
+
+**Randomness is not produced on Robinhood Chain.** It comes from Chainlink VRF v2.5 on Base:
+
+- **Chainlink VRF**: verifiable off-chain by the VRF proof (the wall trusts the relay for the
+  proof parts but the word itself is the coordinator's).
+- **The relay**: trusted to forward the word unchanged — and structured so it *cannot* choose,
+  filter or mutate one (§2). It accepts randomness only from its immutable coordinator and only
+  for requests it made, for the first time (subsequent words are ignored).
+- **Chainlink CCIP**: the wall accepts messages only from its immutable router + selector +
+  relay triple.
+
+Accepted trade-offs: sybil is cost-linear (1000 NOTES per ticket), settlement is pull-based,
+direct token transfers to the wall are untracked and unrecoverable, and a stalled
+CCIP/VRF leg *delays* (never destroys) a prize — the epoch stays Requested and retryable.
+
+---
+
+## 6 · Verification status & live cross-chain tests
+
+| Check | Status |
+| --- | --- |
+| `hardhat compile` (Solidity 0.8.20) | ✅ |
+| `hardhat test` (22 tests incl. cross-chain paths vs. interface-faithful mocks) | ✅ |
+| `tsc` strict (hardhat + frontend) | ✅ |
+| `npm run build` (Next.js prod build, typecheck) | ✅ |
+| Deployment + wiring read back on both chains (`wall.relay()`, relay `WALL()`, key hash, VRF consumer, subscription balance) | ✅ via `scripts/status.ts` |
+| **CCIP wall → relay, live** | ✅ executed on mainnet; relay's `ccipReceive` verified invoked (on-chain trace) |
+| **VRF request live** | ✅ `RandomWordsRequested` + on-chain commitment emitted |
+| **VRF fulfillment → CCIP back → `WinnerDrawn`** | ⚠️ pending on Chainlink's fulfiller — not our plumbing (see below) |
+| External audit | ❌ none |
+
+### What the live rehearsal proved (2026-10-15, on 10-minute test walls)
+
+Every step up to the VRF fulfiller was executed on real mainnets, including the
+failure modes of *both* integration layers:
+
+- **CCIP delivery requires an explicit `supportsInterface`** claim on the receiver: without it
+  the off-ramp silently converts the message into a token-only transfer (payload lost, status
+  still SUCCESS). Reproduced live, fixed, and verified by an on-chain trace of real Chainlink
+  executor transactions (ERC-165 probes + `ccipReceive`).
+- **Relay↔wall pairing is enforced strictly**: a relay bound to a different wall reverts with
+  `UnexpectedSender`; the CCIP message moves to FAILED with an ABI-encoded revert reason —
+  and because `setRelay()` is one-shot on the wall, a mismatched pair was re-deployed fresh
+  instead of being hot-patched (by design).
+- **The VRF leg**: `requestRandomWords` succeeds, emits `RandomWordsRequested`, and stores the
+  commitment on-chain — but the Chainlink fulfiller did not pick up our requests for hours.
+  Isolation probes (fresh subscription, direct EOA consumer, correctly tagged `ExtraArgsV1`,
+  both gwei lanes, a byte-identical clone of a request that fulfilled for another party in
+  1–2 blocks) all confirmed the stall is inside Chainlink's off-chain request selection —
+  during the same window, fulfillments kept succeeding for a handful of long-running
+  subscriptions at 1–2 block delays.
+
+Consequences for this project: the pending requests carry **no on-chain timeout and no cost**;
+when the fulfiller picks them up, the relay forwards the word automatically with its existing
+CCIP ETH balance and the wall settles (`WinnerDrawn`). The production paths are:
+
+1. **Wait/switch VRF fulfillment** — fund with LINK instead of native, or a lane/tier the
+   Base fulfiller actually serves; confirm in the Chainlink sub manager and/or support.
+2. **Second independent randomness source** (drand/commit–reveal) used only if VRF stalls
+   beyond a deadline — keeping the VRF word as the primary source and the failure path honest.
+3. **Keep the relay neutral** in both cases: first-word-wins per epoch remains valid no matter
+   which source satisfies it (or it should be re-deployed with its own fresh-wall pair).
+
+---
+
+## 7 · Setup
 
 ```bash
 npm install
+npm run compile     # hardhat compile
+npm test            # hardhat test
 ```
 
-### 4.2 Compile & test the contract
+Hardhat scripts load `tsconfig.hardhat.json` (CommonJS). Set it first:
+`export TS_NODE_PROJECT=tsconfig.hardhat.json`.
 
-```bash
-npm run compile     # hardhat compile (artifacts/)
-npm test            # hardhat test — validation, events, pagination, payments
-```
-
-### 4.3 Deploy
+### Deploy (three stages)
 
 ```bash
 cp .env.example .env
-# fill in:  DEPLOYER_PRIVATE_KEY  (wallet funded with ETH on the target chain for gas)
-#           PAYMENT_TOKEN         (your ERC-20 address — deploy the token first)
+# DEPLOYER_PRIVATE_KEY: a throwaway, funded deployer. Never commit a funded key.
 
-PAYMENT_TOKEN=0xYourTokenAddress npm run deploy:robinhood      # Robinhood Chain mainnet — the real target
-PAYMENT_TOKEN=0xYourTokenAddress npm run deploy:baseSepolia    # Base Sepolia — read-only experiments
+# 1. Wall on Robinhood Chain
+PAYMENT_TOKEN=0x03b76ccf7cfeec5198c81c5844b88a78e68a6173 \
+  npx hardhat run scripts/deploy.ts --network robinhood
+
+# 2. Relay + VRF subscription on Base (needs WALL_ADDRESS from step 1)
+WALL_ADDRESS=0x... npx hardhat run scripts/deploy-relay.ts --network base
+#   VRF_KEY_HASH=<lane> VRF_SUB_ID=<id> RELAY_FEE_FUND_ETH=... VRF_SUB_FUND_ETH=...
+
+# 3. Wire the wall to the relay — exactly once (needs RELAY_ADDRESS from step 2)
+RELAY_ADDRESS=0x... npx hardhat run scripts/set-relay.ts --network robinhood
 ```
 
-The script prints the contract address, the deploy tx hash, and the exact
-`NEXT_PUBLIC_NOTES_CONTRACT_ADDRESS=` / `NEXT_PUBLIC_PAYMENT_TOKEN_ADDRESS=`
-lines to paste into `.env.local`.
+`deploy-relay.ts` creates a native-ETH VRF subscription (or reuses `VRF_SUB_ID`), deploys the
+relay, adds it as a consumer, and funds CCIP reply fees. The key hash is env-selectable because
+Chainlink lanes differ in fulfiller coverage (see §6).
 
-> **Important**: the wall takes the payment-token address as a constructor argument
-> (`constructor(IERC20 _paymentToken)`) — deploy your ERC-20 first, then the wall. The
-> deploy script requires the `PAYMENT_TOKEN` env var and warns if no code exists at that
-> address on the target chain — `stampNote` reverts until the token is live. The
-> production deployment target is **Robinhood Chain**.
-
-### 4.4 Frontend env (`.env.local`)
+### Frontend (`.env.local`)
 
 ```bash
-NEXT_PUBLIC_NOTES_CONTRACT_ADDRESS=0xYourDeployedAddress   # required to go live
-NEXT_PUBLIC_PAYMENT_TOKEN_ADDRESS=0xYourTokenAddress       # required to go live
-NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=                      # optional (WalletConnect QR)
+NEXT_PUBLIC_NOTES_CONTRACT_ADDRESS=0xbD4808f0B262C9abaBB886fbC64c4DcCf22e2110
+NEXT_PUBLIC_PAYMENT_TOKEN_ADDRESS=0x03b76ccf7cfeec5198c81c5844b88a78e68a6173
+NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=   # optional
 ```
 
-> Without `NEXT_PUBLIC_NOTES_CONTRACT_ADDRESS` the board runs in **demo mode** with
-> sample notes so you can see the design; stamping is disabled.
-
-### 4.5 Run the app
+Without the notes address the board runs in demo mode with stamping disabled.
 
 ```bash
-npm run dev         # http://localhost:3000
-npm run build       # production build (also typechecks)
+npm run dev     # http://localhost:3000
+npm run build   # production build (also typechecks)
 ```
 
-> Don't run `npm run build` while `npm run dev` is running — both share `.next/` and
-> the dev server's chunks will start 404ing (page stuck at "loading the wall").
-> Restart the dev server if that happens.
+Don't run `npm run build` while `npm run dev` is running (both use `.next/`).
 
 ---
 
-## 5 · How the frontend works
+## 8 · Frontend contract surface (v3)
 
-1. **Connect wallet** — `WalletButton` uses wagmi's `useConnect`/`useAccount`;
-   connected state shows the truncated address (`0x1234...abcd`) and a disconnect menu.
-2. **Place** — the FAB opens *placement mode*: a draggable dashed ghost note appears on
-   the cork. Drag it anywhere on the 3200×2200 canvas; the tag under it shows the live
-   `X / Y` coordinates that will be written on-chain.
-3. **Compose** — clicking the ghost opens the retro modal: 280-char counter, six pastel
-   swatches, a reroll-able tilt (−15°…+15°), and a live paper preview.
-4. **Stamp (two steps the first time)** — *Stamp Permanently On-Chain* first asks for a
-   one-time **unlimited NOTES approval** (step 1/2), then sends the nonpayable
-   `stampNote` (step 2/2). The contract pulls the **1000 NOTES** fee, burns 500 to the
-   dead address and adds 500 to the weekly pool, and (on the first stamp after a 7-day
-   boundary) settles the previous epoch's top-10 rewards. The note then springs onto
-   the wall **and the NFT is minted to your wallet**.
-5. **Real-time** — `useNotes` paginates `getNotes(0,50)` / `(50,50)`… for history and
-   subscribes to `NoteCreated`, so stamps from *other* wallets appear instantly too.
+The ABI in `src/lib/contract.ts` is hand-written and must match `contracts/IMDRetroWall.sol`.
 
-### Overlapping & layering rules
+- Writes: `stampNote`, `requestSettlement(epoch)` (payable, CCIP fee), `claimReward()`.
+- Reads: `getTotalNotes`, `getNotes`, `getNote`, `currentEpoch`, `timeUntilEpochEnd`,
+  `stampsInEpoch`, `ticketCount`, `ticketOf`, `epochPrize`, `settlementStatus`, `claimable`.
+- Events: `NoteCreated`, `SettlementRequested`, `WinnerDrawn`, `RewardClaimed`, `RelaySet`.
 
-- `z-index = 10 + note.id × 2` → newer notes always stack above older ones.
-- Hovering lifts a note (`y: -10`, `scale: 1.05`) and drops it to `opacity: 0.85`
-  while jumping its z-index to the top — the peel hint that shows paper underneath.
-- Clicking a note pins it to the front of the stack.
+The v2-era leaderboard and manual settlement functions no longer exist.
 
 ---
 
-## 6 · Gas & L2 notes
-
-- `stampNote` stores 2 strings + 4 value types, updates the epoch counter + leaderboard,
-  mints an ERC-721, and pulls the 1000 NOTES fee (500 burned / 500 to pool); on these L2s
-  this is a few cents in gas at normal congestion.
-- The contract is **immutable and ownerless** — there is no pause, no upgrade, no admin
-  key, and the epoch/leaderboard/reward split are hardcoded constants. Deploys use
-  `evmVersion: paris` so the same bytecode runs cleanly on Robinhood Chain and Base Sepolia.
-- Reads are paginated at 50 notes/call (frontend cap: 40 pages = 2 000 notes, with a
-  20 s total-count poll picking up growth beyond that).
-
----
-
-## 7 · Troubleshooting
+## 9 · Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
 | "CONTRACT NOT SET" banner | Set `NEXT_PUBLIC_NOTES_CONTRACT_ADDRESS` in `.env.local`, restart `npm run dev`. |
-| Wallet on wrong chain | Switch the wallet (or the frontend default chain in `src/lib/wagmi.ts`) to Robinhood Chain. |
-| Board stuck at "loading the wall" | Dev server chunks went stale (usually after `next build` ran while `next dev` was up). Restart `npm run dev` and hard-refresh the tab. |
-| Stamp reverts on the token transfer | Not enough NOTES balance (< 1000), or the one-time approval was revoked. Approve again (the modal shows STEP 1/2). |
-| Stamp reverts sending ETH | `stampNote` is nonpayable — do not attach ETH. The fee is 1000 NOTES, pulled via `transferFrom`. |
-| Notes don't appear after stamping | The tx may still be pending; the counter polls every 20 s and the event listener fires on inclusion. |
-| `getNotes` reverts `PageOutOfBounds` | Frontend offset > total (wall shrank? impossible — append-only). Refetch count. |
+| Wallet on wrong chain | Switch to Robinhood Chain (4663). |
+| Stamp reverts on the token transfer | Balance below 1000 NOTES, or the approval was revoked. Approve again. |
+| Stamp reverts with `StampLimitReached` | The address already has 5 stamps in this epoch. |
+| `requestSettlement` reverts `RelayNotSet` | `setRelay` (step 3) has not run. |
+| `requestSettlement` reverts `SettlementPending` | A request is in flight. Wait for `SETTLEMENT_RETRY_DELAY` (1 day). |
+| Epoch stuck in Requested | Check relay ETH balance (`InsufficientBalance`) and VRF subscription balance; top up. See §6 for the fulfiller-stall case. |

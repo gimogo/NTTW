@@ -3,61 +3,77 @@ pragma solidity ^0.8.20;
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {Client, IRouterClient} from "./interfaces/ChainlinkCCIP.sol";
+import {IAny2EVMMessageReceiver} from "./interfaces/ChainlinkCCIP.sol";
 
 /**
- * @title IMDRetroWall
- * @notice A fully autonomous, immutable, ownerless sticky-note wall where
- *         every stamped note is minted on-chain as a unique ERC-721 NFT.
+ * @title IMDRetroWall (v3)
+ * @notice Immutable, ownerless sticky-note wall. Every stamped note is an
+ *         ERC-721 on this chain. Each stamp is also one lottery ticket in its
+ *         epoch, and each epoch's prize pool goes to ONE winner drawn at random.
  *
- *         Gamified weekly reward economy (standalone ERC-721; no Uniswap
- *         hooks):
- *           - `stampNote` charges a fixed TOKEN_FEE in the project ERC-20:
- *             50% is burned, 50% accrues to `weeklyRewardPool`.
- *           - Time is split into 7-day epochs. Every epoch keeps a live
- *             top-10 leaderboard (`currentTopMinters`) maintained
- *             incrementally with a bounded insertion sort (max 10 slots).
- *           - The first stamp after an epoch boundary rolls the epoch over:
- *             the pool is distributed 30/15/15/8/8/8/4/4/4/4 (%) by rank,
- *             empty slots are skipped (their share rolls over), the board
- *             is cleared, and the counters restart.
+ *         Economics per stamp (ERC-20 `PAYMENT_TOKEN`, 1000 tokens total):
+ *           - 500 tokens are sent to the dead address (burned) immediately.
+ *           - 500 tokens are kept in this contract as the epoch prize pool.
+ *           - The stamp adds one ticket to the epoch's ticket list.
+ *           - Each address may stamp at most MAX_STAMPS_PER_EPOCH per epoch.
  *
- *         Design goals (EVM L2s — Robinhood Chain / Base Sepolia):
- *           - No admin, no upgradability, no pause: once deployed, the wall
- *             belongs to everyone forever.
- *           - Custom errors instead of require-strings (cheaper reverts).
- *           - Checks-Effects-Interactions ordering in every write path.
- *           - Paginated reads (`getNotes`) so the frontend never pulls the
- *             whole array in one eth_call.
- *           - Events carry the full payload so an indexer / frontend listener
- *             can render new notes in real time without extra reads.
+ *         Settlement (per 7-day epoch, once the epoch has ended):
+ *           1. Anyone calls `requestSettlement(epoch)` and pays the CCIP fee.
+ *           2. This contract sends a CCIP message to the relay on Base
+ *              (`VrfCcipRelay`), which asks Chainlink VRF v2.5 for a random word.
+ *           3. The relay sends the random word back by CCIP.
+ *              `ccipReceive` picks the winner as `tickets[word % ticketCount]`
+ *              and credits the whole prize pool to `claimable[winner]`.
+ *           4. The winner pulls the reward with `claimReward()`.
+ *           An epoch with no tickets settles with no payout.
  *
- *         The public array getter `allNotes(uint256)` is auto-generated and
- *         returns the struct's value-type fields; use `getNotes`/`getNote`
- *         to also retrieve the string fields.
+ *         Trust model (read before relying on the prize):
+ *           - Randomness comes from Chainlink VRF on Base, not from this chain.
+ *             The relay on Base is trusted to forward the VRF word unchanged.
+ *           - Only the CCIP router may call `ccipReceive`, and only messages
+ *             from the configured relay on the configured lane are accepted.
+ *           - The relay address is set once by the deployer (`setRelay`),
+ *             then the contract has no admin. Nothing can be paused or
+ *             upgraded.
+ *           - A winner is paid only if the stamp was recorded in the epoch.
+ *             Stamps are never removed.
  *
- *         Payment-token assumption: `PAYMENT_TOKEN` is a standard ERC-20
- *         without transfer hooks (no callbacks on transfer/transferFrom),
- *         so CEI ordering alone makes the state machine reentrancy-safe.
+ *         Known limitations:
+ *           - Sybil addresses can buy more tickets, but only up to the per-
+ *             address cap per epoch. Each stamp costs 1000 tokens, so buying
+ *             more tickets means spending more.
+ *           - Tokens sent to this contract directly (not via `stampNote`) are
+ *             not tracked and cannot be recovered.
+ *           - If the relay on Base is misconfigured or the CCIP lane stops
+ *             working, a settlement can be retried after SETTLEMENT_RETRY_DELAY.
  */
-contract IMDRetroWall is ERC721, ERC721Enumerable {
+contract IMDRetroWall is ERC721, ERC721Enumerable, IAny2EVMMessageReceiver {
     using Strings for uint256;
+    using SafeERC20 for IERC20;
 
-    /// @dev Both ERC721 and ERC721Enumerable define `supportsInterface`,
-    ///      so the derived contract must override it to disambiguate.
+    /// @dev Both ERC721 and ERC721Enumerable define `supportsInterface`.
+    /// @dev This must also claim the CCIP receiver interface: the CCIP offRamp
+    ///      only calls `ccipReceive` when the receiver advertises it via
+    ///      ERC-165. Without this, incoming settlement messages are silently
+    ///      treated as token-only transfers (zero tokens = no-op) while the
+    ///      message is still marked SUCCESS, and settlements never complete.
     function supportsInterface(bytes4 interfaceId)
         public
         view
         override(ERC721, ERC721Enumerable)
         returns (bool)
     {
-        return super.supportsInterface(interfaceId);
+        return interfaceId == type(IAny2EVMMessageReceiver).interfaceId
+            || super.supportsInterface(interfaceId);
     }
 
-    /// @dev Both ERC721 and ERC721Enumerable hook `_update`; override to
-    ///      keep ERC721Enumerable's bookkeeping in sync with transfers/mints.
+    /// @dev Both ERC721 and ERC721Enumerable hook `_update`.
     function _update(
         address to,
         uint256 tokenId,
@@ -66,7 +82,7 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         return super._update(to, tokenId, auth);
     }
 
-    /// @dev Also override `_increaseBalance` (required by ERC721Enumerable).
+    /// @dev Required by ERC721Enumerable.
     function _increaseBalance(address account, uint128 value)
         internal
         virtual
@@ -79,7 +95,7 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
     // Note validation constants
     // ---------------------------------------------------------------------
 
-    /// @notice Maximum note content length, in bytes (UTF-8), per the spec.
+    /// @notice Maximum note content length, in bytes (UTF-8).
     uint256 public constant MAX_CONTENT_BYTES = 280;
 
     /// @notice Minimum tilt allowed for a note (degrees).
@@ -88,49 +104,57 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
     /// @notice Maximum tilt allowed for a note (degrees).
     int8 public constant MAX_ROTATION = 15;
 
-    /// @notice Maximum X/Y coordinate (uint16 space). The board is a
-    ///         65535 x 65535 virtual canvas; the frontend maps viewport
-    ///         pixels / percentages into this space.
+    /// @notice Maximum X/Y coordinate (uint16 space).
     uint16 public constant MAX_POSITION = type(uint16).max;
 
     // ---------------------------------------------------------------------
     // Payment constants
     // ---------------------------------------------------------------------
 
-    /// @notice Custom ERC-20 charged per stamp. Set once in the constructor
-    ///         and immutable afterwards — the deployed token must be a
-    ///         standard ERC-20 compliant 18-decimal token.
+    /// @notice ERC-20 charged per stamp. Set once in the constructor.
     IERC20 public immutable PAYMENT_TOKEN;
 
-    /// @notice Total token fee per stamp, in PAYMENT_TOKEN base units
-    ///         (1000 tokens, 18 decimals).
+    /// @notice Total token fee per stamp (1000 tokens, 18 decimals).
     uint256 public constant TOKEN_FEE = 1000e18;
 
-    /// @notice Half of TOKEN_FEE — pulled from the staker straight to the
-    ///         dead address and destroyed in the same transfer.
+    /// @notice Half of TOKEN_FEE is burned on each stamp.
     uint256 public constant TOKEN_FEE_BURN_SHARE = TOKEN_FEE / 2; // 500e18
 
-    /// @notice The other half of TOKEN_FEE — pulled from the staker into
-    ///         this contract and added to `weeklyRewardPool`.
+    /// @notice The other half of TOKEN_FEE is kept as the epoch prize pool.
     uint256 public constant TOKEN_FEE_POOL_SHARE = TOKEN_FEE - TOKEN_FEE_BURN_SHARE; // 500e18
 
-    /// @notice Canonical burn (dead) address the burn share is sent to and
-    ///         permanently destroyed at.
-    address public constant TOKEN_BURN =
-        0x000000000000000000000000000000000000dEaD;
+    /// @notice Burn (dead) address.
+    address public constant TOKEN_BURN = 0x000000000000000000000000000000000000dEaD;
 
     // ---------------------------------------------------------------------
-    // Epoch constants
+    // Epoch and randomness constants
     // ---------------------------------------------------------------------
 
     /// @notice One epoch lasts exactly 7 days.
     uint256 public constant EPOCH_DURATION = 7 days;
 
-    /// @notice Leaderboard size — a fixed top 10.
-    uint256 public constant LEADERBOARD_SIZE = 10;
+    /// @notice Maximum stamps one address may make per epoch.
+    uint256 public constant MAX_STAMPS_PER_EPOCH = 5;
 
-    /// @notice Basis-point denominator for the rank shares (100% = 10 000).
-    uint256 private constant BASIS_POINTS = 10_000;
+    /// @notice A pending settlement may be re-requested after this delay
+    ///         (covers a lost or stalled CCIP message).
+    uint256 public constant SETTLEMENT_RETRY_DELAY = 1 days;
+
+    /// @notice Gas limit for the CCIP message that executes `ccipReceive`
+    ///         on this contract.
+    uint256 public constant CCIP_GAS_LIMIT = 300_000;
+
+    /// @notice CCIP chain selector of the relay chain (Base mainnet).
+    uint64 public immutable RELAY_CHAIN_SELECTOR;
+
+    /// @notice Chainlink CCIP router on this chain (Robinhood Chain).
+    IRouterClient public immutable CCIP_ROUTER;
+
+    /// @notice Relay contract on the relay chain (set once by the deployer).
+    address public relay;
+
+    /// @notice Deployer allowed to call `setRelay` once.
+    address public immutable DEPLOYER;
 
     // ---------------------------------------------------------------------
     // Storage
@@ -139,7 +163,7 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
     struct Note {
         uint256 id;
         address author;
-        string content; // max 280 bytes
+        string content; // max 280 bytes, valid UTF-8
         string color; // "#RRGGBB" hex string
         uint16 posX; // 0..65535 virtual canvas X
         uint16 posY; // 0..65535 virtual canvas Y
@@ -147,36 +171,45 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         uint256 timestamp;
     }
 
-    /// @notice Append-only wall of notes. Newer notes have higher ids —
-    ///         the frontend derives stacking z-index from this.
+    enum SettlementStatus {
+        None,
+        Requested,
+        Settled
+    }
+
+    /// @notice Append-only wall of notes. Note id == tokenId.
     Note[] public allNotes;
 
-    /// @notice Current epoch number; starts at 1 and increments every
-    ///         EPOCH_DURATION (lazily, on the first stamp after the boundary).
-    uint256 public currentEpoch = 1;
+    /// @notice Start of epoch 1. Epoch k runs from genesis + (k-1) * EPOCH_DURATION.
+    uint256 public immutable GENESIS;
 
-    /// @notice Timestamp the current epoch started. Set at deployment and
-    ///         refreshed on every epoch rollover.
-    uint256 public epochStartTime;
+    /// @notice Stamps made by an address in an epoch.
+    mapping(uint256 => mapping(address => uint256)) public stampsInEpoch;
 
-    /// @notice Token pool accrued this epoch: the 50% pool share of every
-    ///         stamp. Distributed to the top 10 on rollover; any share not
-    ///         distributed (empty leaderboard slots) rolls over.
-    uint256 public weeklyRewardPool;
+    /// @notice Ticket list for an epoch. One entry per stamp, so an address
+    ///         appears once per stamp it made. Winner = tickets[random % length].
+    mapping(uint256 => address[]) private _tickets;
 
-    /// @notice Per-epoch stamped-note counter: epoch => author => count.
-    mapping(uint256 => mapping(address => uint256)) public noteCountPerEpoch;
+    /// @notice Prize pool for an epoch (500 tokens per stamp).
+    mapping(uint256 => uint256) public epochPrize;
 
-    /// @notice Fixed-size leaderboard for the current epoch, best first.
-    ///         address(0) means the slot is empty.
-    address[10] public currentTopMinters;
+    /// @notice Settlement state per epoch.
+    mapping(uint256 => SettlementStatus) public settlementStatus;
+
+    /// @notice Timestamp of the latest settlement request for an epoch.
+    mapping(uint256 => uint256) public settlementRequestedAt;
+
+    /// @notice Winnings credited to an address, withdrawn with `claimReward`.
+    mapping(address => uint256) public claimable;
+
+    /// @notice Sum of all `claimable` balances.
+    uint256 public totalClaimable;
 
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
 
-    /// @notice Emitted on every successful stamp. Indexed fields allow
-    ///         filtered subscriptions (`id`, `author`).
+    /// @notice Emitted on every successful stamp.
     event NoteCreated(
         uint256 indexed id,
         address indexed author,
@@ -188,43 +221,86 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         uint256 timestamp
     );
 
-    /// @notice Emitted when a winner receives its rank share on rollover.
-    event RewardPaid(address indexed winner, uint256 indexed rank, uint256 amount);
+    /// @notice Emitted when the relay address is set (once).
+    event RelaySet(address indexed relay);
 
-    /// @notice Emitted once per epoch rollover with the full settlement.
-    event EpochAdvanced(
-        uint256 indexed previousEpoch,
-        uint256 indexed newEpoch,
-        uint256 distributed,
-        uint256 rolledOverPool
-    );
+    /// @notice Emitted when a settlement is sent to the relay.
+    event SettlementRequested(uint256 indexed epoch, bytes32 indexed messageId, address indexed caller);
+
+    /// @notice Emitted when a winner is drawn. `winner` is address(0) and
+    ///         `prize` is 0 for an epoch with no tickets.
+    event WinnerDrawn(uint256 indexed epoch, address indexed winner, uint256 prize, uint256 randomWord);
+
+    /// @notice Emitted when a winner withdraws.
+    event RewardClaimed(address indexed account, uint256 amount);
 
     // ---------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------
 
     error EmptyPaymentToken();
+    error InvalidTokenDecimals(uint8 decimals);
+    error ZeroAddress();
 
     error EmptyContent();
     error ContentTooLong(uint256 length);
+    error InvalidUtf8();
     error InvalidColor(string color);
     error InvalidRotation(int8 rotation);
-    error PageOutOfBounds(uint256 offset, uint256 total);
+    error StampLimitReached(uint256 limit);
     error NoteNotFound(uint256 id);
     error TokenTransferFailed();
-    error RewardTransferFailed(address winner);
+
+    error EpochNotEnded(uint256 epoch);
+    error EpochAlreadySettled(uint256 epoch);
+    error SettlementPending(uint256 epoch, uint256 retryAt);
+    error InsufficientFee(uint256 required, uint256 provided);
+    error RelayNotSet();
+    error RelayAlreadySet();
+    error NotDeployer();
+    error NotRouter(address caller);
+    error UnexpectedSourceChain(uint64 selector);
+    error UnexpectedSender(address sender);
+    error RefundFailed();
+    error NothingToClaim();
 
     // ---------------------------------------------------------------------
     // Constructor
     // ---------------------------------------------------------------------
 
-    constructor(IERC20 _paymentToken) ERC721("IMD Retro Wall Note", "IMDNOTE") {
-        if (address(_paymentToken) == address(0)) {
-            // the fee is token-only; a null token would make every stamp fail
-            revert EmptyPaymentToken();
-        }
+    /**
+     * @param _paymentToken       ERC-20 charged per stamp (18 decimals).
+     * @param _ccipRouter         Chainlink CCIP router on this chain.
+     * @param _relayChainSelector CCIP chain selector of the relay chain (Base).
+     */
+    constructor(
+        IERC20 _paymentToken,
+        address _ccipRouter,
+        uint64 _relayChainSelector
+    ) ERC721("IMD Retro Wall Note", "IMDNOTE") {
+        if (address(_paymentToken) == address(0)) revert EmptyPaymentToken();
+        if (_ccipRouter == address(0)) revert ZeroAddress();
+
+        uint8 decimals = IERC20Metadata(address(_paymentToken)).decimals();
+        if (decimals != 18) revert InvalidTokenDecimals(decimals);
+
         PAYMENT_TOKEN = _paymentToken;
-        epochStartTime = block.timestamp;
+        CCIP_ROUTER = IRouterClient(_ccipRouter);
+        RELAY_CHAIN_SELECTOR = _relayChainSelector;
+        DEPLOYER = msg.sender;
+        GENESIS = block.timestamp;
+    }
+
+    /**
+     * @notice Set the relay address on the relay chain. One time only.
+     * @dev    Deployer-only. After this call there is no admin.
+     */
+    function setRelay(address _relay) external {
+        if (msg.sender != DEPLOYER) revert NotDeployer();
+        if (relay != address(0)) revert RelayAlreadySet();
+        if (_relay == address(0)) revert ZeroAddress();
+        relay = _relay;
+        emit RelaySet(_relay);
     }
 
     // ---------------------------------------------------------------------
@@ -232,23 +308,17 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
     // ---------------------------------------------------------------------
 
     /**
-     * @notice Stamp a new note permanently on the wall, mint its NFT, and
-     *         enter the author into the current epoch's leaderboard.
-     *         Payment (token only — no ETH) is enforced atomically:
-     *           - `TOKEN_FEE_BURN_SHARE` (50 tokens) is pulled from
-     *             `msg.sender` straight to `TOKEN_BURN` (destroyed).
-     *           - `TOKEN_FEE_POOL_SHARE` (50 tokens) is pulled from
-     *             `msg.sender` into this contract and added to
-     *             `weeklyRewardPool`.
-     *         Requires a prior ERC-20 `approve` of at least TOKEN_FEE.
-     * @dev  Rolls the epoch over first if a 7-day boundary has passed, so
-     *       the stamp is counted into the fresh epoch.
-     * @param _content  Note text, 1..280 UTF-8 bytes.
-     * @param _color    Hex color, exactly "#RRGGBB" (or "0xRRGGBB").
+     * @notice Stamp a note permanently on the wall and mint its NFT.
+     *         Each stamp is one ticket in the current epoch's lottery.
+     *         Payment is token-only and atomic: 500 tokens are burned and
+     *         500 are kept in the prize pool. Requires a prior ERC-20
+     *         `approve` of at least TOKEN_FEE.
+     * @param _content  Note text, 1..280 bytes of valid UTF-8.
+     * @param _color    Hex color, exactly "#RRGGBB".
      * @param _posX     X coordinate on the 65535-wide virtual canvas.
      * @param _posY     Y coordinate on the 65535-tall virtual canvas.
      * @param _rotation Tilt in degrees, -15..15.
-     * @return id       The id of the newly minted note / token.
+     * @return id       Id of the new note (also its tokenId).
      */
     function stampNote(
         string calldata _content,
@@ -257,79 +327,179 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         uint16 _posY,
         int8 _rotation
     ) external returns (uint256 id) {
-        // --- Epoch rollover (previous epoch's pool settlement) ---
-        if (block.timestamp >= epochStartTime + EPOCH_DURATION) {
-            _processEpochReset();
-        }
-
         // --- Checks ---
         uint256 len = bytes(_content).length;
         if (len == 0) revert EmptyContent();
         if (len > MAX_CONTENT_BYTES) revert ContentTooLong(len);
+        if (!_isValidUtf8(bytes(_content))) revert InvalidUtf8();
         if (!_isValidHexColor(_color)) revert InvalidColor(_color);
         if (_rotation < MIN_ROTATION || _rotation > MAX_ROTATION) {
             revert InvalidRotation(_rotation);
         }
+        uint256 epoch = currentEpoch();
+        uint256 newCount = stampsInEpoch[epoch][msg.sender] + 1;
+        if (newCount > MAX_STAMPS_PER_EPOCH) revert StampLimitReached(MAX_STAMPS_PER_EPOCH);
 
         // --- Effects ---
-        id = allNotes.length; // ids are sequential, starting at 0
+        id = allNotes.length;
         uint256 ts = block.timestamp;
+        allNotes.push(Note(id, msg.sender, _content, _color, _posX, _posY, _rotation, ts));
 
-        allNotes.push(
-            Note(id, msg.sender, _content, _color, _posX, _posY, _rotation, ts)
-        );
-
-        // Per-epoch counter + live leaderboard maintenance.
-        uint256 newCount = ++noteCountPerEpoch[currentEpoch][msg.sender];
-        _updateLeaderboard(msg.sender, newCount);
-
-        // Accrue this stamp's pool share (the transfer below is atomic with
-        // it — a failed pull reverts the accrual too).
-        weeklyRewardPool += TOKEN_FEE_POOL_SHARE;
+        stampsInEpoch[epoch][msg.sender] = newCount;
+        _tickets[epoch].push(msg.sender);
+        epochPrize[epoch] += TOKEN_FEE_POOL_SHARE;
 
         emit NoteCreated(id, msg.sender, _content, _color, _posX, _posY, _rotation, ts);
 
         // --- Interactions ---
-        // 50% of the fee: straight to the dead address (burned).
-        if (!PAYMENT_TOKEN.transferFrom(msg.sender, TOKEN_BURN, TOKEN_FEE_BURN_SHARE)) {
-            revert TokenTransferFailed();
-        }
-        // 50% of the fee: into the contract, backing weeklyRewardPool.
-        if (
-            !PAYMENT_TOKEN.transferFrom(msg.sender, address(this), TOKEN_FEE_POOL_SHARE)
-        ) {
-            revert TokenTransferFailed();
+        PAYMENT_TOKEN.safeTransferFrom(msg.sender, TOKEN_BURN, TOKEN_FEE_BURN_SHARE);
+        PAYMENT_TOKEN.safeTransferFrom(msg.sender, address(this), TOKEN_FEE_POOL_SHARE);
+
+        _safeMint(msg.sender, id);
+    }
+
+    /**
+     * @notice Ask the relay for a random word for an ended epoch and draw its
+     *         winner when the word arrives. Callable by anyone, and the caller
+     *         pays the CCIP fee. Excess native value is refunded.
+     * @dev    Epoch 0 and the current/future epochs are rejected. A pending
+     *         request may be re-sent after SETTLEMENT_RETRY_DELAY. A settled
+     *         epoch cannot be requested again.
+     */
+    function requestSettlement(uint256 epoch) external payable returns (bytes32 messageId) {
+        if (relay == address(0)) revert RelayNotSet();
+        if (epoch == 0 || epoch >= currentEpoch()) revert EpochNotEnded(epoch);
+
+        SettlementStatus status = settlementStatus[epoch];
+        if (status == SettlementStatus.Settled) revert EpochAlreadySettled(epoch);
+        if (status == SettlementStatus.Requested) {
+            uint256 retryAt = settlementRequestedAt[epoch] + SETTLEMENT_RETRY_DELAY;
+            if (block.timestamp < retryAt) revert SettlementPending(epoch, retryAt);
         }
 
-        // Mint the note as a unique ERC-721 to its author.
-        _safeMint(msg.sender, id);
+        // Epoch with no tickets: nothing to draw, settle without a relay call.
+        if (_tickets[epoch].length == 0) {
+            settlementStatus[epoch] = SettlementStatus.Settled;
+            emit WinnerDrawn(epoch, address(0), 0, 0);
+            _refundExcess(msg.value, 0);
+            return bytes32(0);
+        }
+
+        Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
+            receiver: abi.encode(relay),
+            data: abi.encode(epoch),
+            tokenAmounts: new Client.EVMTokenAmount[](0),
+            feeToken: address(0),
+            extraArgs: Client._argsToBytes(
+                Client.EVMExtraArgsV2({gasLimit: CCIP_GAS_LIMIT, allowOutOfOrderExecution: true})
+            )
+        });
+
+        uint256 fee = CCIP_ROUTER.getFee(RELAY_CHAIN_SELECTOR, message);
+        if (msg.value < fee) revert InsufficientFee(fee, msg.value);
+
+        settlementStatus[epoch] = SettlementStatus.Requested;
+        settlementRequestedAt[epoch] = block.timestamp;
+
+        messageId = CCIP_ROUTER.ccipSend{value: fee}(RELAY_CHAIN_SELECTOR, message);
+        emit SettlementRequested(epoch, messageId, msg.sender);
+
+        _refundExcess(msg.value, fee);
+    }
+
+    /**
+     * @notice CCIP entry point. Accepts a random word from the relay and draws
+     *         the winner for the epoch in the message.
+     * @dev    Callable only by the CCIP router, and only for messages from the
+     *         relay on the relay chain. The winner is picked as
+     *         tickets[randomWord % ticketCount].
+     */
+    function ccipReceive(Client.Any2EVMMessage calldata message) external override {
+        if (msg.sender != address(CCIP_ROUTER)) revert NotRouter(msg.sender);
+        if (message.sourceChainSelector != RELAY_CHAIN_SELECTOR) {
+            revert UnexpectedSourceChain(message.sourceChainSelector);
+        }
+        address sender = abi.decode(message.sender, (address));
+        if (sender == address(0) || sender != relay) revert UnexpectedSender(sender);
+
+        (uint256 epoch, uint256 randomWord) = abi.decode(message.data, (uint256, uint256));
+        if (settlementStatus[epoch] == SettlementStatus.Settled) revert EpochAlreadySettled(epoch);
+
+        address[] storage tickets = _tickets[epoch];
+        uint256 prize = epochPrize[epoch];
+        settlementStatus[epoch] = SettlementStatus.Settled;
+
+        if (tickets.length == 0) {
+            emit WinnerDrawn(epoch, address(0), 0, randomWord);
+            return;
+        }
+
+        address winner = tickets[randomWord % tickets.length];
+        epochPrize[epoch] = 0;
+        claimable[winner] += prize;
+        totalClaimable += prize;
+
+        emit WinnerDrawn(epoch, winner, prize, randomWord);
+    }
+
+    /// @notice Withdraw a prize credited by `ccipReceive`.
+    function claimReward() external returns (uint256 amount) {
+        amount = claimable[msg.sender];
+        if (amount == 0) revert NothingToClaim();
+
+        // Effects before interaction.
+        claimable[msg.sender] = 0;
+        totalClaimable -= amount;
+
+        PAYMENT_TOKEN.safeTransfer(msg.sender, amount);
+        emit RewardClaimed(msg.sender, amount);
     }
 
     // ---------------------------------------------------------------------
     // Reads
     // ---------------------------------------------------------------------
 
+    /// @notice Current epoch number (epoch 1 starts at GENESIS).
+    function currentEpoch() public view returns (uint256) {
+        return (block.timestamp - GENESIS) / EPOCH_DURATION + 1;
+    }
+
+    /// @notice Seconds until the current epoch ends.
+    function timeUntilEpochEnd() external view returns (uint256) {
+        uint256 end = GENESIS + currentEpoch() * EPOCH_DURATION;
+        return end - block.timestamp;
+    }
+
+    /// @notice Number of tickets (stamps) in an epoch.
+    function ticketCount(uint256 epoch) external view returns (uint256) {
+        return _tickets[epoch].length;
+    }
+
+    /// @notice Ticket holder at a given index for an epoch.
+    function ticketOf(uint256 epoch, uint256 index) external view returns (address) {
+        return _tickets[epoch][index];
+    }
+
     /// @notice Total number of notes on the wall.
     function getTotalNotes() external view returns (uint256) {
         return allNotes.length;
     }
 
+    /// @notice Read a single note by id (reverts if it doesn't exist).
+    function getNote(uint256 id) external view returns (Note memory) {
+        return _noteOf(id);
+    }
+
     /**
      * @notice Paginated read for the frontend.
-     * @param offset Index to start from (0-based).
+     * @param offset Index to start from.
      * @param limit  Maximum number of notes to return.
-     * @return page  Slice [offset, min(offset + limit, total)).
      */
-    function getNotes(
-        uint256 offset,
-        uint256 limit
-    ) external view returns (Note[] memory page) {
+    function getNotes(uint256 offset, uint256 limit) external view returns (Note[] memory page) {
         uint256 total = allNotes.length;
-        if (offset > total) revert PageOutOfBounds(offset, total);
+        if (offset >= total) return new Note[](0);
 
-        uint256 end = offset + limit;
-        if (end > total) end = total;
-
+        uint256 end = limit > total - offset ? total : offset + limit;
         uint256 n = end - offset;
         page = new Note[](n);
         for (uint256 i = 0; i < n; ) {
@@ -340,28 +510,7 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         }
     }
 
-    /// @notice Read a single note by id (reverts if it doesn't exist).
-    function getNote(uint256 id) external view returns (Note memory) {
-        if (id >= allNotes.length) revert NoteNotFound(id);
-        return allNotes[id];
-    }
-
-    /// @notice Batch read of the live leaderboard (rank 1 first; zero
-    ///         addresses mean fewer than 10 minters this epoch).
-    function getCurrentTopMinters() external view returns (address[10] memory) {
-        return currentTopMinters;
-    }
-
-    /// @notice Seconds until the next epoch rollover (0 once due; the next
-    ///         stamp settles the epoch).
-    function timeUntilEpochEnd() external view returns (uint256) {
-        uint256 end = epochStartTime + EPOCH_DURATION;
-        return block.timestamp >= end ? 0 : end - block.timestamp;
-    }
-
-    /// @notice On-chain token metadata (data URI). Exposes the note's
-    ///         content, author, color, position and rotation so each NFT
-    ///         is fully self-describing without an off-chain server.
+    /// @notice On-chain token metadata as a base64 JSON data URI.
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         Note memory n = _noteOf(tokenId);
 
@@ -382,11 +531,7 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
             )
         );
         string memory color = string(
-            abi.encodePacked(
-                "{\"trait_type\":\"Color\",\"value\":\"",
-                n.color,
-                "\"},"
-            )
+            abi.encodePacked("{\"trait_type\":\"Color\",\"value\":\"", n.color, "\"},")
         );
         string memory content = string(
             abi.encodePacked(
@@ -416,167 +561,35 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
             )
         );
 
-        string memory json = string(
-            abi.encodePacked(header, author, color, content, pos, tail)
-        );
+        string memory json = string(abi.encodePacked(header, author, color, content, pos, tail));
 
-        return string(abi.encodePacked("data:application/json,", json));
+        return string(abi.encodePacked("data:application/json;base64,", Base64.encode(bytes(json))));
     }
 
     // ---------------------------------------------------------------------
-    // Internals — leaderboard
+    // Internals
     // ---------------------------------------------------------------------
 
-    /**
-     * @dev Keeps `currentTopMinters` sorted with a bounded insertion sort
-     *      (fixed 10 slots, at most 10 iterations per pass):
-     *        1. If the minter already holds a slot, shift the tail up one to
-     *           close the gap.
-     *        2. Scan from rank 1 and insert before the first slot whose
-     *           count is strictly smaller (or the first empty slot).
-     *      Tie-breaker: the scan uses a STRICT `<` comparison, so a member
-     *      that already holds a given count keeps the higher rank over any
-     *      later arrival reaching the same count.
-     */
-    function _updateLeaderboard(address minter, uint256 newCount) private {
-        // Pass 1: locate and evict the minter's current slot, if any.
-        for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
-            if (currentTopMinters[i] == minter) {
-                for (uint256 j = i; j < LEADERBOARD_SIZE - 1; ) {
-                    currentTopMinters[j] = currentTopMinters[j + 1];
-                    unchecked {
-                        ++j;
-                    }
-                }
-                currentTopMinters[LEADERBOARD_SIZE - 1] = address(0);
-                break;
-            }
-            unchecked {
-                ++i;
-            }
-        }
-
-        // Pass 2: find the insertion rank (first strictly-lower count, or
-        // the first empty slot). insertAt == 10 → didn't make the board.
-        uint256 insertAt = LEADERBOARD_SIZE;
-        for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
-            address holder = currentTopMinters[i];
-            if (holder == address(0) || noteCountPerEpoch[currentEpoch][holder] < newCount) {
-                insertAt = i;
-                break;
-            }
-            unchecked {
-                ++i;
-            }
-        }
-        if (insertAt == LEADERBOARD_SIZE) return;
-
-        // Shift the tail down one slot and place the minter.
-        for (uint256 i = LEADERBOARD_SIZE - 1; i > insertAt; ) {
-            currentTopMinters[i] = currentTopMinters[i - 1];
-            unchecked {
-                --i;
-            }
-        }
-        currentTopMinters[insertAt] = minter;
-    }
-
-    // ---------------------------------------------------------------------
-    // Internals — epoch rollover
-    // ---------------------------------------------------------------------
-
-    /**
-     * @dev Settles the ending epoch, strictly CEI-style: every storage
-     *      effect (pool accounting, leaderboard clear, epoch bump) is
-     *      committed BEFORE the single external interaction type (ERC-20
-     *      transfers to winners).
-     *
-     *      Rank shares (basis points): 1st 30%, 2nd-3rd 15% each,
-     *      4th-6th 8% each, 7th-10th 4% each (sums to exactly 100%).
-     *      Empty slots are skipped; their share stays in the contract and
-     *      rolls over into the next epoch's pool. Both share computations
-     *      below use identical integer math, so the summed transfers match
-     *      `distributed` to the wei.
-     */
-    function _processEpochReset() private {
-        uint256 pool = weeklyRewardPool;
-        address[10] memory winners = currentTopMinters; // snapshot for payouts
-
-        // Rank shares; identical literal in both loops by construction.
-        uint256[10] memory shareBps = [
-            uint256(3000),
-            1500,
-            1500,
-            800,
-            800,
-            800,
-            400,
-            400,
-            400,
-            400
-        ];
-
-        // ---- Effects ----
-        uint256 distributed;
-        if (pool > 0) {
-            for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
-                if (winners[i] != address(0)) {
-                    distributed += (pool * shareBps[i]) / BASIS_POINTS;
-                }
-                unchecked {
-                    ++i;
-                }
-            }
-            // Rollover: only what was actually claimed leaves the pool.
-            weeklyRewardPool = pool - distributed;
-        }
-        for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
-            currentTopMinters[i] = address(0);
-            unchecked {
-                ++i;
-            }
-        }
-        uint256 previousEpoch = currentEpoch;
-        currentEpoch = previousEpoch + 1;
-        epochStartTime = block.timestamp;
-
-        // ---- Interactions ----
-        if (pool > 0) {
-            for (uint256 i = 0; i < LEADERBOARD_SIZE; ) {
-                address winner = winners[i];
-                if (winner != address(0)) {
-                    uint256 share = (pool * shareBps[i]) / BASIS_POINTS;
-                    if (share > 0) {
-                        if (!PAYMENT_TOKEN.transfer(winner, share)) {
-                            revert RewardTransferFailed(winner);
-                        }
-                        emit RewardPaid(winner, i + 1, share);
-                    }
-                }
-                unchecked {
-                    ++i;
-                }
-            }
-        }
-
-        emit EpochAdvanced(previousEpoch, currentEpoch, distributed, weeklyRewardPool);
-    }
-
-    // ---------------------------------------------------------------------
-    // Internals — helpers
-    // ---------------------------------------------------------------------
-
-    /// @dev Fetches a note by id, reverting if it does not exist. Reuses the
-    ///      same check as the public `getNote` reader.
     function _noteOf(uint256 id) internal view returns (Note memory) {
         if (id >= allNotes.length) revert NoteNotFound(id);
         return allNotes[id];
     }
 
-    /// @dev Renders a signed int8 as a decimal string.
+    /// @dev Refunds native value above `fee` to the caller.
+    function _refundExcess(uint256 provided, uint256 fee) private {
+        uint256 excess = provided - fee;
+        if (excess > 0) {
+            (bool ok, ) = msg.sender.call{value: excess}("");
+            if (!ok) revert RefundFailed();
+        }
+    }
+
+    /// @dev Signed int8 -> decimal string, e.g. -12 -> "-12".
     function _signedToString(int8 v) internal pure returns (string memory) {
-        if (v >= 0) return uint256(uint8(v)).toString();
-        return string(abi.encodePacked("-", uint256(uint8(-v)).toString()));
+        if (v < 0) {
+            return string(abi.encodePacked("-", uint256(-int256(v)).toString()));
+        }
+        return uint256(int256(v)).toString();
     }
 
     /// @dev Lowercases hex address into a "0x..." string for metadata.
@@ -596,50 +609,41 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
         return string(s);
     }
 
-    /// @dev Escapes a note's content for embedding in the tokenURI JSON
-    ///      string (quotes, backslashes, and control characters), so any
-    ///      valid UTF-8 note renders as legal JSON metadata.
+    /// @dev Escapes a note's content for embedding in the metadata JSON
+    ///      string (quotes, backslashes, and control characters).
     function _jsonEscape(string memory s) internal pure returns (string memory) {
         bytes memory inB = bytes(s);
         uint256 len = inB.length;
         // Worst case per byte: "\u00XX" = 6 chars.
         uint256 cap = len * 6;
-        // Scratch buffer of raw bytes. Staying on the `uint8[]` type (instead
-        // of indexing `bytes` directly) sidesteps a solc 0.8.20 codegen quirk
-        // where a `bytes` index inside an `unchecked` loop can still panic
-        // 0x32 out-of-bounds; we cast to `bytes` once, at the end.
+        // Scratch buffer of raw bytes. Staying on the `uint8[]` type avoids a
+        // solc 0.8.20 codegen quirk with `bytes` indexing inside unchecked loops.
         uint8[] memory buf = new uint8[](cap);
         uint256 j = 0;
 
         for (uint256 i = 0; i < len; ) {
             uint8 v = uint8(inB[i]);
             if (v == 0x22) {
-                // '"'
                 buf[j] = 0x5c;
                 buf[j + 1] = 0x22;
                 j += 2;
             } else if (v == 0x5c) {
-                // '\\'
                 buf[j] = 0x5c;
                 buf[j + 1] = 0x5c;
                 j += 2;
             } else if (v == 0x0a) {
-                // '\n'
                 buf[j] = 0x5c;
                 buf[j + 1] = 0x6e;
                 j += 2;
             } else if (v == 0x0d) {
-                // '\r'
                 buf[j] = 0x5c;
                 buf[j + 1] = 0x72;
                 j += 2;
             } else if (v == 0x09) {
-                // '\t'
                 buf[j] = 0x5c;
                 buf[j + 1] = 0x74;
                 j += 2;
             } else if (v < 0x20) {
-                // Other control chars -> \u00XX
                 buf[j] = 0x5c;
                 buf[j + 1] = 0x75;
                 buf[j + 2] = 0x30;
@@ -668,31 +672,79 @@ contract IMDRetroWall is ERC721, ERC721Enumerable {
 
     /// @dev Nibble (0..15) -> lowercase hex character.
     function _hexDigit(uint8 nibble) private pure returns (bytes1) {
-        return nibble < 10
-            ? bytes1(uint8(0x30) + nibble) // '0'..'9'
-            : bytes1(uint8(0x61) + nibble - 10); // 'a'..'f'
+        return
+            nibble < 10
+                ? bytes1(uint8(0x30) + nibble) // '0'..'9'
+                : bytes1(uint8(0x61) + nibble - 10); // 'a'..'f'
     }
 
-    /// @dev Accepts "#RRGGBB" (7 bytes) or "0xRRGGBB" (8 bytes), case-insensitive.
+    /// @dev Accepts exactly "#RRGGBB" (7 bytes), case-insensitive.
     function _isValidHexColor(string calldata color) internal pure returns (bool) {
         bytes memory b = bytes(color);
+        if (b.length != 7 || b[0] != "#") return false;
 
-        uint256 start;
-        if (b.length == 7 && b[0] == "#") {
-            start = 1;
-        } else if (b.length == 8 && b[0] == "0" && b[1] == "x") {
-            start = 2;
-        } else {
-            return false;
-        }
-
-        for (uint256 i = start; i < b.length; ) {
+        for (uint256 i = 1; i < 7; ) {
             bytes1 c = b[i];
             bool ok = (c >= "0" && c <= "9") || (c >= "a" && c <= "f") || (c >= "A" && c <= "F");
             if (!ok) return false;
             unchecked {
                 ++i;
             }
+        }
+        return true;
+    }
+
+    /// @dev Strict RFC 3629 UTF-8 validation (no overlongs, no surrogates,
+    ///      nothing above U+10FFFF).
+    function _isValidUtf8(bytes memory b) internal pure returns (bool) {
+        uint256 len = b.length;
+        uint256 i = 0;
+        while (i < len) {
+            uint8 c = uint8(b[i]);
+            if (c < 0x80) {
+                i += 1;
+                continue;
+            }
+
+            uint256 need;
+            uint8 lo = 0x80;
+            uint8 hi = 0xBF;
+            if (c >= 0xC2 && c <= 0xDF) {
+                need = 1;
+            } else if (c == 0xE0) {
+                need = 2;
+                lo = 0xA0;
+            } else if (c >= 0xE1 && c <= 0xEC) {
+                need = 2;
+            } else if (c == 0xED) {
+                need = 2;
+                hi = 0x9F;
+            } else if (c >= 0xEE && c <= 0xEF) {
+                need = 2;
+            } else if (c == 0xF0) {
+                need = 3;
+                lo = 0x90;
+            } else if (c >= 0xF1 && c <= 0xF3) {
+                need = 3;
+            } else if (c == 0xF4) {
+                need = 3;
+                hi = 0x8F;
+            } else {
+                return false;
+            }
+
+            if (i + need >= len) return false;
+
+            uint8 c1 = uint8(b[i + 1]);
+            if (c1 < lo || c1 > hi) return false;
+            for (uint256 k = 2; k <= need; ) {
+                uint8 ck = uint8(b[i + k]);
+                if (ck < 0x80 || ck > 0xBF) return false;
+                unchecked {
+                    ++k;
+                }
+            }
+            i += need + 1;
         }
         return true;
     }

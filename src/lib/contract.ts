@@ -96,6 +96,110 @@ export const retroNotesAbi = [
       { name: "timestamp", type: "uint256", indexed: false },
     ],
   },
+  {
+    type: "function",
+    name: "currentEpoch",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "timeUntilEpochEnd",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "stampsInEpoch",
+    stateMutability: "view",
+    inputs: [
+      { name: "", type: "uint256" },
+      { name: "", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "ticketCount",
+    stateMutability: "view",
+    inputs: [{ name: "epoch", type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "ticketOf",
+    stateMutability: "view",
+    inputs: [
+      { name: "epoch", type: "uint256" },
+      { name: "index", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
+    name: "epochPrize",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "settlementStatus",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "uint256" }],
+    // 0 = None, 1 = Requested, 2 = Settled
+    outputs: [{ name: "", type: "uint8" }],
+  },
+  {
+    type: "function",
+    name: "claimable",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "requestSettlement",
+    stateMutability: "payable",
+    inputs: [{ name: "epoch", type: "uint256" }],
+    outputs: [{ name: "messageId", type: "bytes32" }],
+  },
+  {
+    type: "function",
+    name: "claimReward",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [{ name: "amount", type: "uint256" }],
+  },
+  {
+    type: "event",
+    name: "SettlementRequested",
+    inputs: [
+      { name: "epoch", type: "uint256", indexed: true },
+      { name: "messageId", type: "bytes32", indexed: true },
+      { name: "caller", type: "address", indexed: true },
+    ],
+  },
+  {
+    type: "event",
+    name: "WinnerDrawn",
+    inputs: [
+      { name: "epoch", type: "uint256", indexed: true },
+      { name: "winner", type: "address", indexed: true },
+      { name: "prize", type: "uint256", indexed: false },
+      { name: "randomWord", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "RewardClaimed",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
   // Custom errors (surfaced in tx failures)
   { type: "error", name: "EmptyContent", inputs: [] },
   {
@@ -103,6 +207,40 @@ export const retroNotesAbi = [
     name: "ContentTooLong",
     inputs: [{ name: "length", type: "uint256" }],
   },
+  { type: "error", name: "InvalidUtf8", inputs: [] },
+  {
+    type: "error",
+    name: "StampLimitReached",
+    inputs: [{ name: "limit", type: "uint256" }],
+  },
+  {
+    type: "error",
+    name: "EpochNotEnded",
+    inputs: [{ name: "epoch", type: "uint256" }],
+  },
+  {
+    type: "error",
+    name: "EpochAlreadySettled",
+    inputs: [{ name: "epoch", type: "uint256" }],
+  },
+  {
+    type: "error",
+    name: "SettlementPending",
+    inputs: [
+      { name: "epoch", type: "uint256" },
+      { name: "retryAt", type: "uint256" },
+    ],
+  },
+  {
+    type: "error",
+    name: "InsufficientFee",
+    inputs: [
+      { name: "required", type: "uint256" },
+      { name: "provided", type: "uint256" },
+    ],
+  },
+  { type: "error", name: "RelayNotSet", inputs: [] },
+  { type: "error", name: "NothingToClaim", inputs: [] },
   {
     type: "error",
     name: "InvalidColor",
@@ -115,23 +253,10 @@ export const retroNotesAbi = [
   },
   {
     type: "error",
-    name: "PageOutOfBounds",
-    inputs: [
-      { name: "offset", type: "uint256" },
-      { name: "total", type: "uint256" },
-    ],
-  },
-  {
-    type: "error",
     name: "NoteNotFound",
     inputs: [{ name: "id", type: "uint256" }],
   },
   { type: "error", name: "TokenTransferFailed", inputs: [] },
-  {
-    type: "error",
-    name: "RewardTransferFailed",
-    inputs: [{ name: "winner", type: "address" }],
-  },
 ] as const;
 
 /**
@@ -154,7 +279,7 @@ export function getPaymentTokenAddress(): `0x${string}` | undefined {
 export const TOKEN_FEE = 1_000_000_000_000_000_000_000n; // 1000e18
 /** 50% of the fee — burned to the dead address. */
 export const TOKEN_FEE_BURN_SHARE = 500_000_000_000_000_000_000n; // 500e18
-/** 50% of the fee — accrued into the weekly reward pool. */
+/** 50% of the fee — kept in the contract as the epoch's prize pool. */
 export const TOKEN_FEE_POOL_SHARE = 500_000_000_000_000_000_000n; // 500e18
 /** Unlimited approval sentinel (type(uint256).max) — approve once, stamp freely. */
 export const MAX_UINT256 = 2n ** 256n - 1n;

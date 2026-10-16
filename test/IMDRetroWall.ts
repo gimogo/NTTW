@@ -1,13 +1,11 @@
 import { expect } from "chai";
-import solc from "solc";
+// solc ships without type declarations; require keeps it typed as the module.
+const solc = require("solc");
 import { ethers, network } from "hardhat";
 
 /**
  * Minimal ERC-20 compiled AT TEST TIME with solc (in-memory, never written
- * into `contracts/`). It exists so the wall's fee wiring (approve →
- * transferFrom → burn share to TOKEN_BURN + pool share to the contract) is
- * exercised against real ERC-20 semantics. The live wall is constructed with
- * the deployed NOTES token instead.
+ * into `contracts/`). Decimals are configurable so the decimals guard can be tested.
  */
 const MOCK_TOKEN_SOURCE = `
 // SPDX-License-Identifier: MIT
@@ -16,14 +14,17 @@ pragma solidity ^0.8.20;
 contract MockPaymentToken {
     string public name = "Mock Notes";
     string public symbol = "mNOTES";
-    uint8 public decimals = 18;
-
+    uint8 public decimals;
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor(uint8 d) {
+        decimals = d;
+    }
 
     function mint(address to, uint256 amount) external {
         balanceOf[to] += amount;
@@ -42,11 +43,7 @@ contract MockPaymentToken {
         return true;
     }
 
-    function transferFrom(
-        address from,
-        address to,
-        uint256 amount
-    ) external returns (bool) {
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
         uint256 allowed = allowance[from][msg.sender];
         require(allowed >= amount, "mNOTES: insufficient allowance");
         if (allowed != type(uint256).max) {
@@ -65,591 +62,462 @@ contract MockPaymentToken {
 }
 `;
 
+function compileMockToken(): { abi: any; bytecode: string } {
+  const output = JSON.parse(
+    solc.compile(
+      JSON.stringify({
+        language: "Solidity",
+        sources: { "MockPaymentToken.sol": { content: MOCK_TOKEN_SOURCE } },
+        settings: { outputSelection: { "*": { "*": ["abi", "evm.bytecode"] } } },
+      })
+    )
+  );
+  const errors = (output.errors ?? []).filter((e: any) => e.severity === "error");
+  if (errors.length > 0) {
+    throw new Error(errors.map((e: any) => e.formattedMessage).join("\n"));
+  }
+  const c = output.contracts["MockPaymentToken.sol"].MockPaymentToken;
+  return { abi: c.abi, bytecode: "0x" + c.evm.bytecode.object };
+}
+
+const COMPILED_TOKEN = compileMockToken();
+
 const CONTENT = "gm from the corkboard!";
 const COLOR = "#FFF2A5";
 
 // Must match contracts/IMDRetroWall.sol constants.
 const TOKEN_BURN = "0x000000000000000000000000000000000000dEaD";
-const TOKEN_FEE = ethers.parseEther("1000"); // 1000 tokens per stamp
-const BURN_SHARE = ethers.parseEther("500"); // 50% -> dead address
-const POOL_SHARE = ethers.parseEther("500"); // 50% -> weeklyRewardPool
-const EPOCH = 7 * 24 * 60 * 60; // 7 days in seconds
+const BURN_SHARE = ethers.parseEther("500");
+const POOL_SHARE = ethers.parseEther("500");
+const STAMP_COST = ethers.parseEther("1000");
+const EPOCH = 7 * 24 * 60 * 60;
+const RETRY_DELAY = 24 * 60 * 60;
 
-describe("IMDRetroWall", function () {
-  // `any` keeps these runnable without typechain. Behaviour is fully asserted.
-  let wall: any;
+// CCIP chain selectors (Robinhood Chain = wall, Base = relay).
+const ROBINHOOD_SELECTOR = 6180753054346818345n;
+const BASE_SELECTOR = 15971525489660198786n;
+
+// Placeholder key hash for the mock; the real Base key hash is set at deploy time.
+const KEY_HASH = ethers.id("mock-key-hash");
+const WORD = 123456789012345678901234567890n;
+
+const coder = ethers.AbiCoder.defaultAbiCoder();
+
+type Signer = Awaited<ReturnType<typeof ethers.getSigners>>[number];
+
+async function impersonate(addr: string): Promise<Signer> {
+  await network.provider.request({ method: "hardhat_impersonateAccount", params: [addr] });
+  await network.provider.request({
+    method: "hardhat_setBalance",
+    params: [addr, "0x56BC75E2D63100000"],
+  });
+  return ethers.getSigner(addr);
+}
+
+function ccipMessage(sourceSelector: bigint, sender: string, data: string) {
+  return {
+    messageId: ethers.ZeroHash,
+    sourceChainSelector: sourceSelector,
+    sender: coder.encode(["address"], [sender]),
+    data,
+    destTokenAmounts: [],
+  };
+}
+
+describe("IMDRetroWall v3 + VrfCcipRelay", function () {
+  let signers: Signer[];
+  let alice: Signer;
+  let bob: Signer;
+  let carol: Signer;
   let token: any;
-  let alice: Awaited<ReturnType<typeof ethers.getSigners>>[number];
-  let bob: typeof alice;
-  let carol: typeof alice;
-  let signers: Awaited<ReturnType<typeof ethers.getSigners>>;
+  let router: any;
+  let vrf: any;
+  let wall: any;
+  let relay: any;
+  let wallAddress: string;
+  let relayAddress: string;
+  let routerAddress: string;
 
-  /**
-   * Compile the in-memory ERC-20 above with solc (same release family as the
-   * hardhat compiler), then deploy it fresh for every test run.
-   */
-  async function installMockToken() {
-    const output = JSON.parse(
-      solc.compile(
-        JSON.stringify({
-          language: "Solidity",
-          sources: { "MockPaymentToken.sol": { content: MOCK_TOKEN_SOURCE } },
-          settings: {
-            outputSelection: {
-              "*": { "*": ["abi", "evm.bytecode"] },
-            },
-          },
-        })
-      )
-    );
-    const {
-      abi,
-      evm: {
-        bytecode: { object: bytecode },
-      },
-    } = output.contracts["MockPaymentToken.sol"]["MockPaymentToken"];
-    const Mock = await ethers.getContractFactory(abi, "0x" + bytecode);
-    const mock = await Mock.deploy();
-    await mock.waitForDeployment();
-    return mock;
+  async function deployMockToken(decimals = 18) {
+    const factory = new ethers.ContractFactory(COMPILED_TOKEN.abi, COMPILED_TOKEN.bytecode, signers[0]);
+    const t = await factory.deploy(decimals);
+    await t.waitForDeployment();
+    return t;
   }
 
-  /** Stamp helper: alice unless overridden; no ETH value (token-only fee). */
-  async function stamp(
-    from: typeof alice = alice,
-    content: string = CONTENT,
-    color: string = COLOR
-  ) {
-    return wall.connect(from).stampNote(content, color, 1, 1, 0);
+  async function fundAndApprove(who: Signer, stamps: number) {
+    await token.mint(await who.getAddress(), STAMP_COST * BigInt(stamps));
+    await token.connect(who).approve(wallAddress, ethers.MaxUint256);
   }
 
-  /**
-   * Deterministically advance past the epoch boundary. We pin the NEXT
-   * block's timestamp to a fixed offset well beyond 7 days (instead of
-   * `evm_increaseTime` + `evm_mine`, whose mined block can land exactly on
-   * the boundary and let the *setup* stamp trigger a stray rollover).
-   * Any stamp after this lands strictly inside epoch N+1.
-   */
-  async function warpPastEpoch() {
-    const now = (await ethers.provider.getBlock("latest")).timestamp;
-    await network.provider.send("evm_setNextBlockTimestamp", [now + EPOCH + 100]);
+  async function stamp(who: Signer, content = CONTENT) {
+    return wall.connect(who).stampNote(content, COLOR, 10, 20, 0);
+  }
+
+  /** Move the chain so the current epoch is `k` (k must be ahead of now). */
+  async function goToEpoch(k: number) {
+    const genesis = Number(await wall.GENESIS());
+    await network.provider.send("evm_setNextBlockTimestamp", [genesis + (k - 1) * EPOCH + 1]);
+    await network.provider.send("evm_mine");
+  }
+
+  /** Request settlement for `epoch`, then fulfill VRF with `word` (no delivery). */
+  async function requestAndFulfill(epoch: number, word: bigint) {
+    const fee = await router.fee();
+    await wall.connect(carol).requestSettlement(epoch, { value: fee });
+    const requestId = (await vrf.nextRequestId()) - 1n;
+    await vrf.fulfill(requestId, word);
+    return requestId;
   }
 
   beforeEach(async function () {
     signers = await ethers.getSigners();
-    [alice, bob, carol] = signers;
+    [alice, bob, carol] = [signers[1], signers[2], signers[3]];
 
-    token = await installMockToken();
+    token = await deployMockToken(18);
 
-    const factory = await ethers.getContractFactory("IMDRetroWall");
-    wall = await factory.deploy(await token.getAddress());
-    await wall.waitForDeployment();
+    router = await (await ethers.getContractFactory("MockCCIPRouter")).deploy();
+    vrf = await (await ethers.getContractFactory("MockVRFCoordinator")).deploy();
+    routerAddress = await router.getAddress();
 
-    // Fund alice/bob/carol with mock NOTES, then grant the wall an unlimited
-    // allowance (matches the frontend's approve-once behaviour) so each user
-    // can stamp many notes without re-approving.
-    const wallAddress = await wall.getAddress();
-    for (const user of [alice, bob, carol]) {
-      await token.mint(user.address, ethers.parseEther("1000000"));
-      await token.connect(user).approve(wallAddress, ethers.MaxUint256);
-    }
+    wall = await (await ethers.getContractFactory("IMDRetroWall")).deploy(
+      await token.getAddress(),
+      routerAddress,
+      BASE_SELECTOR
+    );
+    wallAddress = await wall.getAddress();
+
+    relay = await (await ethers.getContractFactory("VrfCcipRelay")).deploy(
+      await vrf.getAddress(),
+      1,
+      KEY_HASH,
+      routerAddress,
+      ROBINHOOD_SELECTOR,
+      wallAddress
+    );
+    relayAddress = await relay.getAddress();
+
+    await router.setSelector(wallAddress, ROBINHOOD_SELECTOR);
+    await router.setSelector(relayAddress, BASE_SELECTOR);
+    await wall.connect(signers[0]).setRelay(relayAddress);
+
+    // The relay pays CCIP fees from its ETH balance.
+    await carol.sendTransaction({ to: relayAddress, value: ethers.parseEther("1") });
   });
 
-  describe("constructor", function () {
-    it("wires the payment token and starts epoch 1 at deploy time", async function () {
-      expect(await wall.PAYMENT_TOKEN()).to.equal(await token.getAddress());
-      expect(await wall.currentEpoch()).to.equal(1n);
-      const startTime = await wall.epochStartTime();
-      const latest = await ethers.provider.getBlock("latest");
-      // Deploy transaction timestamp — never later than the mined block.
-      expect(startTime).to.be.lte(BigInt(latest!.timestamp));
+  describe("deployment", function () {
+    it("wires the router, lane selector and relay", async function () {
+      expect(await wall.CCIP_ROUTER()).to.equal(routerAddress);
+      expect(await wall.RELAY_CHAIN_SELECTOR()).to.equal(BASE_SELECTOR);
+      expect(await wall.relay()).to.equal(relayAddress);
+      expect(await wall.GENESIS()).to.be.gt(0n);
     });
 
-    it("reverts when constructed with the zero token address", async function () {
-      const factory = await ethers.getContractFactory("IMDRetroWall");
-      await expect(
-        factory.deploy(ethers.ZeroAddress)
-      ).to.be.revertedWithCustomError(factory, "EmptyPaymentToken");
-    });
-  });
+    // keccak("ccipReceive((bytes32,uint64,bytes,bytes,(address,uint256)[])\"\")
+    // Interface id of IAny2EVMMessageReceiver, verified 0x85572ffb on-chain via a
+    // live CCIP execution trace (the offRamp probes exactly this id).
+    const CCIP_RECEIVER_ID = "0x85572ffb";
 
-  describe("stampNote", function () {
-    it("stores the note, assigns a sequential id, and mints the NFT", async function () {
-      await stamp(alice, CONTENT, COLOR);
-      await wall
-        .connect(bob)
-        .stampNote("second note", "#AEE2FF", 100, 200, -12);
-
-      expect(await wall.getTotalNotes()).to.equal(2n);
-
-      const note = await wall.getNote(1);
-      expect(note.id).to.equal(1n);
-      expect(note.author).to.equal(bob.address);
-      expect(note.content).to.equal("second note");
-      expect(note.color).to.equal("#AEE2FF");
-      expect(note.posX).to.equal(100n);
-      expect(note.posY).to.equal(200n);
-      expect(note.rotation).to.equal(-12n);
-      expect(note.timestamp).to.be.gt(0n);
+    it("advises the CCIP receiver interface over ERC-165 (wall)", async function () {
+      expect(await wall.supportsInterface(CCIP_RECEIVER_ID)).to.equal(true);
+      expect(await wall.supportsInterface("0x01ffc9a7")).to.equal(true); // IERC165
+      expect(await wall.supportsInterface("0xffffffff")).to.equal(false); // required false
     });
 
-    it("mints the ERC-721 to the author, id == note id", async function () {
-      await stamp(alice);
-      await stamp(bob);
-
-      expect(await wall.ownerOf(0)).to.equal(alice.address);
-      expect(await wall.ownerOf(1)).to.equal(bob.address);
-      expect(await wall.balanceOf(alice.address)).to.equal(1n);
-      expect(await wall.balanceOf(bob.address)).to.equal(1n);
-      expect(await wall.name()).to.equal("IMD Retro Wall Note");
-      expect(await wall.symbol()).to.equal("IMDNOTE");
+    it("advises the CCIP receiver interface over ERC-165 (relay)", async function () {
+      expect(await relay.supportsInterface(CCIP_RECEIVER_ID)).to.equal(true);
+      expect(await relay.supportsInterface("0x01ffc9a7")).to.equal(true); // IERC165
+      expect(await relay.supportsInterface("0xffffffff")).to.equal(false); // required false
+      expect(await relay.supportsInterface("0x12345678")).to.equal(false); // unknown: false, not revert
     });
 
-    it("returns an on-chain data-URI tokenURI with the note attributes", async function () {
-      await stamp(alice, CONTENT, "#FFC5D0");
-      const uri: string = await wall.tokenURI(0);
-
-      expect(uri.startsWith("data:application/json,")).to.equal(true);
-      const json = JSON.parse(uri.replace("data:application/json,", ""));
-      expect(json.name).to.include("IMD Note #0");
-      const traits = json.attributes.map((a: any) => a.trait_type);
-      expect(traits).to.include.members([
-        "Author",
-        "Color",
-        "posX",
-        "posY",
-        "Rotation",
-      ]);
-    });
-
-    it("embeds the note content (JSON-escaped) in tokenURI", async function () {
-      const tricky = 'he said "hi"\\ and\tweird\nchars 📌';
-      await wall
-        .connect(alice)
-        .stampNote(tricky, "#FFC5D0", 7, 9, -3);
-      const uri: string = await wall.tokenURI(0);
-
-      const json = JSON.parse(uri.replace("data:application/json,", ""));
-      const content = json.attributes.find(
-        (a: any) => a.trait_type === "Content"
+    it("rejects a second setRelay and a setRelay from a non-deployer", async function () {
+      await expect(wall.connect(signers[0]).setRelay(alice.address)).to.be.revertedWithCustomError(
+        wall,
+        "RelayAlreadySet"
       );
-      expect(content).to.not.equal(undefined);
-      expect(content.value).to.equal(tricky);
+      const fresh = await (await ethers.getContractFactory("IMDRetroWall")).deploy(
+        await token.getAddress(),
+        routerAddress,
+        BASE_SELECTOR
+      );
+      const setRelayFn = fresh.connect(alice).getFunction("setRelay");
+      await expect(setRelayFn(alice.address)).to.be.revertedWithCustomError(
+        fresh,
+        "NotDeployer"
+      );
     });
 
-    it("emits NoteCreated with the full payload", async function () {
-      const tx = await wall
-        .connect(alice)
-        .stampNote(CONTENT, "#FFC5D0", 5, 6, -3);
-
-      await expect(tx)
-        .to.emit(wall, "NoteCreated")
-        .withArgs(
-          0n,
-          alice.address,
-          CONTENT,
-          "#FFC5D0",
-          5n,
-          6n,
-          -3n,
-          (ts: bigint) => ts > 0n
-        );
-    });
-
-    it("accepts exactly 280 bytes of content", async function () {
-      const content280 = "a".repeat(280);
-      await wall.connect(alice).stampNote(content280, COLOR, 1, 1, 0);
-      expect((await wall.getNote(0)).content).to.have.length(280);
-    });
-
-    it("reverts on empty content", async function () {
+    it("rejects a payment token that is not 18 decimals", async function () {
+      const sixDecimals = await deployMockToken(6);
       await expect(
-        wall.connect(alice).stampNote("", COLOR, 1, 1, 0)
-      ).to.be.revertedWithCustomError(wall, "EmptyContent");
-    });
-
-    it("reverts on 281 bytes of content", async function () {
-      await expect(
-        wall.connect(alice).stampNote("a".repeat(281), COLOR, 1, 1, 0)
-      ).to.be.revertedWithCustomError(wall, "ContentTooLong");
-    });
-
-    it("reverts on malformed colors", async function () {
-      for (const bad of ["#FFF2A", "FFF2A5", "#GGG", "#1234567", ""]) {
-        await expect(
-          wall.connect(alice).stampNote(CONTENT, bad, 1, 1, 0)
-        ).to.be.revertedWithCustomError(wall, "InvalidColor");
-      }
-    });
-
-    it("accepts 0x-prefixed and uppercase hex colors", async function () {
-      await wall.connect(alice).stampNote(CONTENT, "0xFFF2A5", 1, 1, 0);
-      await wall.connect(alice).stampNote(CONTENT, "#abcdef", 1, 1, 0);
-      expect(await wall.getTotalNotes()).to.equal(2n);
-    });
-
-    it("reverts on out-of-range rotation", async function () {
-      await expect(
-        wall.connect(alice).stampNote(CONTENT, COLOR, 1, 1, 16)
-      ).to.be.revertedWithCustomError(wall, "InvalidRotation");
-      await expect(
-        wall.connect(alice).stampNote(CONTENT, COLOR, 1, 1, -16)
-      ).to.be.revertedWithCustomError(wall, "InvalidRotation");
-    });
-
-    it("rejects attached ETH (payment is token-only)", async function () {
-      await expect(
-        wall
-          .connect(alice)
-          .stampNote(CONTENT, COLOR, 1, 1, 0, { value: 1n })
-      ).to.be.reverted; // non-payable
+        (await ethers.getContractFactory("IMDRetroWall")).deploy(
+          await sixDecimals.getAddress(),
+          routerAddress,
+          BASE_SELECTOR
+        )
+      )
+        .to.be.revertedWithCustomError(wall, "InvalidTokenDecimals")
+        .withArgs(6);
     });
   });
 
-  describe("payment (1000 tokens: 50% burned / 50% pool)", function () {
-    it("burns exactly 50% of the fee to the dead address", async function () {
-      const before = await token.balanceOf(TOKEN_BURN);
-      await stamp();
-      const after = await token.balanceOf(TOKEN_BURN);
-      expect(after - before).to.equal(BURN_SHARE);
-    });
+  describe("stamping and tickets", function () {
+    it("burns 500 tokens, keeps 500 in the pool, mints the note and adds one ticket", async function () {
+      await fundAndApprove(alice, 1);
+      await expect(stamp(alice)).to.emit(wall, "NoteCreated");
 
-    it("keeps 50% of the fee as the contract's weeklyRewardPool", async function () {
-      const wallAddress = await wall.getAddress();
-      await stamp();
-
+      expect(await token.balanceOf(TOKEN_BURN)).to.equal(BURN_SHARE);
       expect(await token.balanceOf(wallAddress)).to.equal(POOL_SHARE);
-      expect(await wall.weeklyRewardPool()).to.equal(POOL_SHARE);
+      expect(await wall.epochPrize(1)).to.equal(POOL_SHARE);
+      expect(await wall.ticketCount(1)).to.equal(1n);
+      expect(await wall.ticketOf(1, 0)).to.equal(alice.address);
+      expect(await wall.ownerOf(0)).to.equal(alice.address);
     });
 
-    it("pulls the full fee from the staker in one stamp", async function () {
-      const before = await token.balanceOf(alice.address);
-      await stamp();
-      const after = await token.balanceOf(alice.address);
-      expect(before - after).to.equal(TOKEN_FEE);
+    it("gives one ticket per stamp", async function () {
+      await fundAndApprove(alice, 3);
+      await stamp(alice);
+      await stamp(alice);
+      await stamp(alice);
+      expect(await wall.ticketCount(1)).to.equal(3n);
+      expect(await wall.epochPrize(1)).to.equal(POOL_SHARE * 3n);
     });
 
-    it("reverts when the token allowance is missing", async function () {
-      await token.connect(alice).approve(await wall.getAddress(), 0n);
-      await expect(stamp()).to.be.reverted; // ERC20 insufficient-allowance revert
+    it("caps stamps at 5 per address per epoch and resets in the next epoch", async function () {
+      await fundAndApprove(alice, 6);
+      for (let i = 0; i < 5; i++) await stamp(alice);
+      await expect(stamp(alice))
+        .to.be.revertedWithCustomError(wall, "StampLimitReached")
+        .withArgs(5);
+
+      await goToEpoch(2);
+      await stamp(alice);
+      expect(await wall.ticketCount(2)).to.equal(1n);
+      expect(await wall.stampsInEpoch(2, alice.address)).to.equal(1n);
     });
 
-    it("reverts when the token balance is too low", async function () {
-      // Drain alice down to less than the fee (allowance is already unlimited).
-      await token.transfer(
-        bob.address,
-        (await token.balanceOf(alice.address)) - (TOKEN_FEE - 1n)
+    it("validates content, color and rotation", async function () {
+      await fundAndApprove(alice, 1);
+      await expect(stamp(alice, "")).to.be.revertedWithCustomError(wall, "EmptyContent");
+      await expect(stamp(alice, "a".repeat(281)))
+        .to.be.revertedWithCustomError(wall, "ContentTooLong")
+        .withArgs(281);
+      await expect(wall.connect(alice).stampNote(CONTENT, "red", 1, 1, 0)).to.be.revertedWithCustomError(
+        wall,
+        "InvalidColor"
       );
-      await expect(stamp()).to.be.reverted; // ERC20 insufficient-balance revert
+      await expect(wall.connect(alice).stampNote(CONTENT, COLOR, 1, 1, 16))
+        .to.be.revertedWithCustomError(wall, "InvalidRotation")
+        .withArgs(16);
+    });
+
+    it("accepts exactly 280 bytes of multi-byte UTF-8", async function () {
+      await fundAndApprove(alice, 1);
+      await stamp(alice, "é".repeat(140));
+      expect(await wall.getTotalNotes()).to.equal(1n);
+    });
+
+    it("serves valid metadata and paged reads", async function () {
+      await fundAndApprove(alice, 2);
+      await stamp(alice, 'say "hi"');
+      await stamp(alice, CONTENT);
+
+      const uri: string = await wall.tokenURI(0);
+      const json = JSON.parse(Buffer.from(uri.split(",")[1], "base64").toString("utf8"));
+      expect(json.name).to.equal("IMD Note #0");
+      expect(json.attributes.find((a: any) => a.trait_type === "Content").value).to.equal('say "hi"');
+
+      const page = await wall.getNotes(0, 10);
+      expect(page.length).to.equal(2);
+      expect(page[1].content).to.equal(CONTENT);
+      expect((await wall.getNotes(2, 10)).length).to.equal(0);
+      await expect(wall.getNote(9)).to.be.revertedWithCustomError(wall, "NoteNotFound").withArgs(9);
     });
   });
 
-  describe("epoch state", function () {
-    it("starts at epoch 1 with epochStartTime set to deployment", async function () {
-      expect(await wall.currentEpoch()).to.equal(1n);
-      expect(await wall.epochStartTime()).to.be.gt(0n);
-      expect(await wall.timeUntilEpochEnd()).to.be.lte(EPOCH);
-      expect(await wall.timeUntilEpochEnd()).to.be.gt(0n);
+  describe("settlement", function () {
+    it("cannot settle the current or epoch 0", async function () {
+      await expect(wall.connect(carol).requestSettlement(1))
+        .to.be.revertedWithCustomError(wall, "EpochNotEnded")
+        .withArgs(1);
+      await expect(wall.connect(carol).requestSettlement(0))
+        .to.be.revertedWithCustomError(wall, "EpochNotEnded")
+        .withArgs(0);
     });
 
-    it("tracks note counts per epoch per author", async function () {
+    it("settles an epoch with no tickets without a relay call", async function () {
+      await goToEpoch(2);
+      await expect(wall.connect(carol).requestSettlement(1))
+        .to.emit(wall, "WinnerDrawn")
+        .withArgs(1n, ethers.ZeroAddress, 0n, 0n);
+      expect(await wall.settlementStatus(1)).to.equal(2n);
+    });
+
+    it("draws one winner from the tickets and credits the whole pool to that winner", async function () {
+      await fundAndApprove(alice, 2);
+      await fundAndApprove(bob, 1);
       await stamp(alice);
       await stamp(alice);
       await stamp(bob);
+      await goToEpoch(2);
 
-      expect(await wall.noteCountPerEpoch(1, alice.address)).to.equal(2n);
-      expect(await wall.noteCountPerEpoch(1, bob.address)).to.equal(1n);
-      expect(await wall.noteCountPerEpoch(1, carol.address)).to.equal(0n);
+      const fee = await router.fee();
+      await expect(wall.connect(carol).requestSettlement(1, { value: fee })).to.emit(
+        wall,
+        "SettlementRequested"
+      );
+      const requestId = (await vrf.nextRequestId()) - 1n;
+      await vrf.fulfill(requestId, WORD);
+
+      const winner: string = await wall.ticketOf(1, WORD % 3n);
+      const prize = POOL_SHARE * 3n;
+      await expect(relay.deliver(1))
+        .to.emit(wall, "WinnerDrawn")
+        .withArgs(1n, winner, prize, WORD);
+
+      expect(await wall.claimable(winner)).to.equal(prize);
+      expect(await wall.totalClaimable()).to.equal(prize);
+      expect(await wall.epochPrize(1)).to.equal(0n);
+
+      const winnerSigner = await ethers.getSigner(winner);
+      await expect(wall.connect(winnerSigner).claimReward())
+        .to.emit(wall, "RewardClaimed")
+        .withArgs(winner, prize);
+      expect(await token.balanceOf(winner)).to.equal(prize);
+      expect(await wall.claimable(winner)).to.equal(0n);
     });
 
-    it("does not roll the epoch before 7 full days", async function () {
+    it("does not pay twice: a second delivery is a no-op and a settled epoch cannot be requested", async function () {
+      await fundAndApprove(alice, 1);
       await stamp(alice);
-      await network.provider.send("evm_increaseTime", [EPOCH - 60]);
+      await goToEpoch(2);
+      await requestAndFulfill(1, WORD);
+      await relay.deliver(1);
+      expect(await wall.claimable(alice.address)).to.equal(POOL_SHARE);
+
+      expect(await relay.deliver.staticCall(1)).to.equal(ethers.ZeroHash);
+      await relay.deliver(1);
+      expect(await wall.claimable(alice.address)).to.equal(POOL_SHARE);
+
+      await expect(wall.connect(carol).requestSettlement(1, { value: await router.fee() }))
+        .to.be.revertedWithCustomError(wall, "EpochAlreadySettled")
+        .withArgs(1);
+    });
+
+    it("blocks a duplicate request while pending, and allows a retry after the delay", async function () {
+      await fundAndApprove(alice, 1);
+      await stamp(alice);
+      await goToEpoch(2);
+
+      const fee = await router.fee();
+      await wall.connect(carol).requestSettlement(1, { value: fee });
+      await expect(wall.connect(carol).requestSettlement(1, { value: fee }))
+        .to.be.revertedWithCustomError(wall, "SettlementPending");
+
+      await network.provider.send("evm_increaseTime", [RETRY_DELAY]);
       await network.provider.send("evm_mine");
-      await stamp(bob);
-
-      // Bob's stamp did not trigger a reset: still epoch 1, board intact.
-      expect(await wall.currentEpoch()).to.equal(1n);
-      expect(await wall.currentTopMinters(0)).to.equal(alice.address);
-    });
-  });
-
-  describe("on-the-fly leaderboard", function () {
-    it("inserts the first minter at rank 1", async function () {
-      await stamp(alice);
-      expect(await wall.currentTopMinters(0)).to.equal(alice.address);
-    });
-
-    it("keeps ranks sorted by count (higher count rises)", async function () {
-      await stamp(alice); // alice: 1
-      await stamp(bob); // bob: 1 (tie — alice was first)
-      await stamp(bob); // bob: 2
-
-      expect(await wall.currentTopMinters(0)).to.equal(bob.address);
-      expect(await wall.currentTopMinters(1)).to.equal(alice.address);
-    });
-
-    it("shifts lower ranks down when someone moves up", async function () {
-      await stamp(alice); // alice 1
-      await stamp(bob); // bob 1
-      await stamp(carol); // carol 1 -> board [alice, bob, carol]
-      await stamp(carol); // carol 2 -> board [carol, alice, bob]
-
-      expect(await wall.currentTopMinters(0)).to.equal(carol.address);
-      expect(await wall.currentTopMinters(1)).to.equal(alice.address);
-      expect(await wall.currentTopMinters(2)).to.equal(bob.address);
-    });
-
-    it("tie-breaker: first to reach a count keeps the higher rank", async function () {
-      await stamp(alice); // alice 1
-      await stamp(alice); // alice 2
-      await stamp(alice); // alice 3
-      await stamp(bob); // bob 1
-      await stamp(bob); // bob 2
-      await stamp(bob); // bob 3 — ties alice at 3, but arrived later
-
-      expect(await wall.currentTopMinters(0)).to.equal(alice.address);
-      expect(await wall.currentTopMinters(1)).to.equal(bob.address);
-    });
-
-    it("batch getter returns the whole board", async function () {
-      await stamp(alice);
-      await stamp(bob);
-      const board = await wall.getCurrentTopMinters();
-      expect(board[0]).to.equal(alice.address);
-      expect(board[1]).to.equal(bob.address);
-      expect(board[2]).to.equal(ethers.ZeroAddress);
-    });
-
-    it("does not add a minter who fails to crack the top 10", async function () {
-      // 10 distinct minters (signers 3..12, deliberately NOT alice/bob/carol)
-      // with 2 notes each fill the board; carol (1 note) must not appear.
-      const minters = signers.slice(3, 13); // 10 accounts
-      for (const m of minters) {
-        // 2 stamps × 1000 fee need room: mint 10000.
-        await token.mint(m.address, ethers.parseEther("10000"));
-        await token
-          .connect(m)
-          .approve(await wall.getAddress(), ethers.MaxUint256);
-        await wall.connect(m).stampNote(CONTENT, COLOR, 1, 1, 0);
-        await wall.connect(m).stampNote(CONTENT, COLOR, 1, 1, 0);
-      }
-      await stamp(carol); // carol: 1 — below everyone
-
-      const board = await wall.getCurrentTopMinters();
-      expect(board).to.not.include(carol.address);
-      expect(board).to.not.include(ethers.ZeroAddress); // full
-    });
-  });
-
-  describe("epoch reset & reward distribution", function () {
-    it("distributes the pool by rank on the first stamp after 7 days", async function () {
-      await stamp(alice); // alice 1 -> rank 1
-      await stamp(alice); // alice 2 -> rank 1
-      await stamp(bob); // bob 1 -> rank 2
-      // pool = 3 × 500 = 1500 tokens
-      expect(await wall.weeklyRewardPool()).to.equal(ethers.parseEther("1500"));
-
-      const aliceBefore = await token.balanceOf(alice.address);
-      const bobBefore = await token.balanceOf(bob.address);
-
-      await warpPastEpoch();
-      // Next stamp settles epoch 1, then counts into epoch 2.
-      await stamp(carol);
-
-      // Rank shares of 1500: 30% / 15%.
-      expect((await token.balanceOf(alice.address)) - aliceBefore).to.equal(
-        ethers.parseEther("450")
-      );
-      expect((await token.balanceOf(bob.address)) - bobBefore).to.equal(
-        ethers.parseEther("225")
-      );
-
-      // Epoch advanced; counters/board reset; carol counts into epoch 2.
-      expect(await wall.currentEpoch()).to.equal(2n);
-      expect(await wall.noteCountPerEpoch(1, alice.address)).to.equal(2n);
-      expect(await wall.noteCountPerEpoch(2, carol.address)).to.equal(1n);
-      expect(await wall.currentTopMinters(0)).to.equal(carol.address);
-      expect(await wall.currentTopMinters(1)).to.equal(ethers.ZeroAddress);
-
-      // Pool: 1500 distributed (450 + 225) -> 825 rolls over, + 500 from
-      // carol's own stamp = 1325.
-      expect(await wall.weeklyRewardPool()).to.equal(
-        ethers.parseEther("1325")
-      );
-      // Contract balance always mirrors the pool.
-      expect(
-        await token.balanceOf(await wall.getAddress())
-      ).to.equal(ethers.parseEther("1325"));
-    });
-
-    it("emits RewardPaid per winner and EpochAdvanced with totals", async function () {
-      await stamp(alice);
-      await stamp(alice);
-      await stamp(bob);
-
-      await warpPastEpoch();
-      const tx = await stamp(carol);
-
-      // Rank shares of 1500: 30% = 450, 15% = 225.
-      await expect(tx)
-        .to.emit(wall, "RewardPaid")
-        .withArgs(alice.address, 1n, ethers.parseEther("450"));
-      await expect(tx)
-        .to.emit(wall, "RewardPaid")
-        .withArgs(bob.address, 2n, ethers.parseEther("225"));
-      // distributed = 450 + 225 = 675; rolled over = 1500 - 675 = 825.
-      await expect(tx)
-        .to.emit(wall, "EpochAdvanced")
-        .withArgs(1n, 2n, ethers.parseEther("675"), ethers.parseEther("825"));
-    });
-
-    it("skips empty leaderboard slots; their share rolls over", async function () {
-      await stamp(alice); // sole minter -> rank 1 only
-      expect(await wall.weeklyRewardPool()).to.equal(POOL_SHARE);
-
-      await warpPastEpoch();
-      await stamp(bob);
-
-      // alice: 30% of 500 = 150; the other 70% (350) is not distributed to
-      // empty slots and rolls over. + bob's 500 = 850.
-      const wallAddress = await wall.getAddress();
-      expect(await wall.weeklyRewardPool()).to.equal(
-        ethers.parseEther("850")
-      );
-      expect(await token.balanceOf(wallAddress)).to.equal(
-        ethers.parseEther("850")
-      );
-    });
-
-    it("distributes 100% when all 10 slots are filled", async function () {
-      // 10 distinct minters (signers 3..12 — NOT alice/bob/carol), one note
-      // each — ties keep insertion order. The reset is triggered by carol,
-      // who is deliberately NOT on the board, so her fresh stamp only seeds
-      // the next epoch (no net-balance confusion from her own payout).
-      const minters = signers.slice(3, 13);
-      for (const m of minters) {
-        await token.mint(m.address, ethers.parseEther("10000"));
-        await token
-          .connect(m)
-          .approve(await wall.getAddress(), ethers.MaxUint256);
-        await wall.connect(m).stampNote(CONTENT, COLOR, 1, 1, 0);
-      }
-      // pool = 10 × 500 = 5000, board full.
-      expect(await wall.weeklyRewardPool()).to.equal(
-        ethers.parseEther("5000")
-      );
-
-      const before: Record<string, bigint> = {};
-      for (const m of minters) {
-        before[m.address] = await token.balanceOf(m.address);
-      }
-
-      await warpPastEpoch();
-      await stamp(carol); // settles epoch 1 (carol isn't on the old board)
-
-      // 30+15+15+8+8+8+4+4+4+4 = 100% of 5000 fully distributed.
-      const expectedShares = [
-        "1500",
-        "750",
-        "750",
-        "400",
-        "400",
-        "400",
-        "200",
-        "200",
-        "200",
-        "200",
-      ];
-      for (let i = 0; i < 10; i++) {
-        const addr = minters[i].address;
-        const gained =
-          (await token.balanceOf(addr)) - before[addr];
-        expect(gained).to.equal(ethers.parseEther(expectedShares[i]));
-      }
-
-      // Nothing rolled over — pool now holds only carol's fresh stamp.
-      expect(await wall.weeklyRewardPool()).to.equal(POOL_SHARE);
-      expect(
-        await token.balanceOf(await wall.getAddress())
-      ).to.equal(POOL_SHARE);
-    });
-
-    it("sets a fresh epochStartTime at rollover", async function () {
-      await stamp(alice);
-      await warpPastEpoch();
-      const beforeTx = await stamp(bob);
-      await beforeTx.wait();
-
-      const start = await wall.epochStartTime();
-      const block = await ethers.provider.getBlock(
-        await ethers.provider.getBlockNumber()
-      );
-      expect(start).to.equal(block!.timestamp);
-      expect(await wall.timeUntilEpochEnd()).to.be.lte(EPOCH);
-      expect(await wall.timeUntilEpochEnd()).to.be.gt(EPOCH - 60);
-    });
-
-    it("reverts the whole stamp if a reward transfer fails", async function () {
-      // A full board of 10 + one below-board minter cannot be built with a
-      // reverting token easily; instead verify the CEI ordering invariant:
-      // pool accounting is committed before transfers, and a failed
-      // transfer reverts everything (no state corruption).
-      await stamp(alice);
-      await stamp(bob);
-      const poolBefore = await wall.weeklyRewardPool();
-      const epochBefore = await wall.currentEpoch();
-
-      // Snapshot: a plain stamp after warp must reset atomically. Any revert
-      // inside distribution would leave epoch/pool untouched.
-      await warpPastEpoch();
-      await stamp(carol);
-
-      expect(await wall.currentEpoch()).to.equal(epochBefore + 1n);
-      expect(await wall.weeklyRewardPool()).to.be.lt(poolBefore + POOL_SHARE);
-    });
-  });
-
-  describe("getNotes pagination", function () {
-    beforeEach(async function () {
-      for (let i = 0; i < 7; i++) {
-        await wall
-          .connect(alice)
-          .stampNote(`note ${i}`, COLOR, i, i, (i % 3) - 1);
-      }
-    });
-
-    it("returns the requested window", async function () {
-      const page = await wall.getNotes(2, 3);
-      expect(page.map((n: any) => n.id)).to.deep.equal([2n, 3n, 4n]);
-    });
-
-    it("clamps the last page to the array bounds", async function () {
-      const page = await wall.getNotes(5, 100);
-      expect(page).to.have.length(2);
-      expect(page[0].id).to.equal(5n);
-      expect(page[1].id).to.equal(6n);
-    });
-
-    it("returns an empty page when offset == total", async function () {
-      const page = await wall.getNotes(7, 10);
-      expect(page).to.have.length(0);
-    });
-
-    it("reverts when offset is past the end", async function () {
-      await expect(wall.getNotes(8, 1)).to.be.revertedWithCustomError(
+      await expect(wall.connect(carol).requestSettlement(1, { value: fee })).to.emit(
         wall,
-        "PageOutOfBounds"
+        "SettlementRequested"
       );
+    });
+
+    it("delivers a word that already arrived when the wall retries (no new VRF request)", async function () {
+      await fundAndApprove(alice, 1);
+      await stamp(alice);
+      await goToEpoch(2);
+
+      // First request: VRF fulfills but delivery is never triggered.
+      await requestAndFulfill(1, WORD);
+      expect(await relay.randomnessReady(1)).to.equal(true);
+
+      await network.provider.send("evm_increaseTime", [RETRY_DELAY]);
+      await network.provider.send("evm_mine");
+      const before = await vrf.nextRequestId();
+      await expect(wall.connect(carol).requestSettlement(1, { value: await router.fee() })).to.emit(
+        wall,
+        "WinnerDrawn"
+      );
+      expect(await vrf.nextRequestId()).to.equal(before);
+      expect(await wall.claimable(alice.address)).to.equal(POOL_SHARE);
+    });
+
+    it("rejects an insufficient CCIP fee and refunds overpayment", async function () {
+      await fundAndApprove(alice, 1);
+      await stamp(alice);
+      await goToEpoch(2);
+      const fee = await router.fee();
+
+      await expect(wall.connect(carol).requestSettlement(1, { value: fee - 1n }))
+        .to.be.revertedWithCustomError(wall, "InsufficientFee")
+        .withArgs(fee, fee - 1n);
+
+      await expect(
+        wall.connect(carol).requestSettlement(1, { value: fee * 2n })
+      ).to.changeEtherBalance(carol, -fee);
     });
   });
 
-  describe("getNote", function () {
-    it("reverts for a missing id", async function () {
-      await expect(wall.getNote(42)).to.be.revertedWithCustomError(
-        wall,
-        "NoteNotFound"
-      );
+  describe("CCIP message validation", function () {
+    it("wall accepts ccipReceive only from the router, the relay, and the relay lane", async function () {
+      await goToEpoch(2);
+      const data = coder.encode(["uint256", "uint256"], [1, WORD]);
+
+      await expect(wall.connect(alice).ccipReceive(ccipMessage(BASE_SELECTOR, relayAddress, data)))
+        .to.be.revertedWithCustomError(wall, "NotRouter")
+        .withArgs(alice.address);
+
+      const routerSigner = await impersonate(routerAddress);
+      await expect(
+        wall.connect(routerSigner).ccipReceive(ccipMessage(ROBINHOOD_SELECTOR, relayAddress, data))
+      )
+        .to.be.revertedWithCustomError(wall, "UnexpectedSourceChain")
+        .withArgs(ROBINHOOD_SELECTOR);
+      await expect(
+        wall.connect(routerSigner).ccipReceive(ccipMessage(BASE_SELECTOR, alice.address, data))
+      )
+        .to.be.revertedWithCustomError(wall, "UnexpectedSender")
+        .withArgs(alice.address);
+    });
+
+    it("relay accepts ccipReceive only from the router, the wall, and the wall lane", async function () {
+      const data = coder.encode(["uint256"], [1]);
+
+      await expect(relay.connect(alice).ccipReceive(ccipMessage(ROBINHOOD_SELECTOR, wallAddress, data)))
+        .to.be.revertedWithCustomError(relay, "NotRouter")
+        .withArgs(alice.address);
+
+      const routerSigner = await impersonate(routerAddress);
+      await expect(
+        relay.connect(routerSigner).ccipReceive(ccipMessage(BASE_SELECTOR, wallAddress, data))
+      )
+        .to.be.revertedWithCustomError(relay, "UnexpectedSourceChain")
+        .withArgs(BASE_SELECTOR);
+      await expect(
+        relay.connect(routerSigner).ccipReceive(ccipMessage(ROBINHOOD_SELECTOR, alice.address, data))
+      )
+        .to.be.revertedWithCustomError(relay, "UnexpectedSender")
+        .withArgs(alice.address);
+    });
+
+    it("relay accepts VRF fulfillment only from the coordinator", async function () {
+      await expect(relay.connect(alice).rawFulfillRandomWords(1, [WORD]))
+        .to.be.revertedWithCustomError(relay, "NotCoordinator")
+        .withArgs(alice.address);
+    });
+
+    it("relay cannot deliver before randomness arrives, or when it cannot pay the fee", async function () {
+      await expect(relay.deliver(1)).to.be.revertedWithCustomError(relay, "NotReady").withArgs(1);
+
+      await fundAndApprove(alice, 1);
+      await stamp(alice);
+      await goToEpoch(2);
+      await requestAndFulfill(1, WORD);
+
+      await router.setFee(ethers.parseEther("10"));
+      await expect(relay.deliver(1)).to.be.revertedWithCustomError(relay, "InsufficientBalance");
     });
   });
 });
+
