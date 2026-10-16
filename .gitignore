@@ -29,3 +29,10 @@ npmcache/
 freebuff-chat-*.md
 .~lock.*#
 persist*.txt
+
+# vercel (host-local deploy artifacts, never commit)
+.vercel/
+
+# broad env sweep (keep the template)
+.env*
+!.env.example
