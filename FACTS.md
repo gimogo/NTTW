@@ -12,7 +12,7 @@ Dibuat 2026-10-16; status live dibaca via RPC publik Robinhood (`rpc.mainnet.cha
 
 ## 1b · Pasangan produksi AKTIF — redeploy 2026-10-16 (semua dibaca balik on-chain)
 
-Live app: TODO — add the deployed frontend URL here (mirrors ENTRY.md).
+Live app: https://nttw-blush.vercel.app/ (mirrors ENTRY.md).
 
 | Item | Nilai | Sumber |
 | --- | --- | --- |
