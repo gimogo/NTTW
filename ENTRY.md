@@ -53,7 +53,7 @@ Verify it yourself:
 | Live wiring via setRelay (rehearsal on a 10-minute test wall, real mainnet, not the production wall) | Robinhood 4663 | https://robin.etherscan.io/tx/0x55e4072f3d179afcd26165cad4508d02ab77944dd29be089238fb6548973fdd4 |
 | Repo | — | https://github.com/gimogo/NTTW |
 | Audit (earlier design, commit d063100 — kept as history; see the current-pair audit above) | — | https://github.com/Identity-md/research/blob/main/jobs/16c65a39-24f4-47d6-a9f5-2140c70791c6/files/AUDIT.md |
-| IMD Radar submission | — | Submitted 2026-10-19 (About text: `ENTRY_RADAR.txt`); add link after approval |
+| IMD Radar submission | — | Submitted on IMD Radar 2026-10-19 (About text: `ENTRY_RADAR.txt`); add link after approval |
 
 Honest status and known limits: the first production pair (deployed 2026-10-15) could never
 settle — its relay bytecode predates the ERC-165 fix, so the CCIP off-ramp silently converted
@@ -88,4 +88,4 @@ run proves the cross-chain machinery end-to-end, while the winner identity was p
 by the 1-ticket epoch. Epoch 2 is live and ends 2026-10-22 04:28:50 UTC.
 
 Links: repo https://github.com/gimogo/NTTW — X https://x.com/NotestotheW
-(@NotestotheW) — IMD Radar: Submitted 2026-10-19.
+(@NotestotheW) — Submitted on IMD Radar 2026-10-19.
