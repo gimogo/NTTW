@@ -258,7 +258,7 @@ sweep) — §10 lists the recovery and liveness trust assumptions in full.
 | **Production wiring both ways** | ✅ `wall.relay()` = relay, `relay.WALL()` = wall, router/selector/key-hash/sub-id match deploy values |
 | **CCIP wall → relay, live** | ✅ executed on mainnet; relay's `ccipReceive` verified invoked (on-chain trace) |
 | **VRF request live** | ✅ `RandomWordsRequested` + on-chain commitment emitted |
-| **VRF fulfillment → CCIP back → `WinnerDrawn`** | ⚠️ pending on Chainlink's fulfiller — observed on the **test pairs (r2/r4)**; the fresh production relay has not yet made a request at writing time (first production `requestSettlement` cannot fire before epoch 1 ends, 2026-10-19 04:28:50 UTC) — see below |
+| **VRF fulfillment → CCIP back → `WinnerDrawn`** | ✅ **executed live on the production pair, 2026-10-19** — full evidence and tx chain in "Epoch 1 settled in production" (below); the multi-hour stalls seen on the **test pairs (r2/r4)** are history (Chainlink's off-chain fulfiller selection) |
 | [IMD audit](https://github.com/Identity-md/research/blob/main/jobs/16c65a39-24f4-47d6-a9f5-2140c70791c6/files/AUDIT.md) (commit `d063100`, earlier top-10-leaderboard design) | ⚠️ completed, but on the earlier design — see the audit-status note below; v3 has **not** been re-audited |
 
 #### The two distinct on-chain failure causes (recorded 2026-10-16)
@@ -270,11 +270,13 @@ sweep) — §10 lists the recovery and liveness trust assumptions in full.
   from that relay — witnessed on-chain by w1's message SUCCESS with zero receiver activity, and
   by w3's `UnexpectedSender` FAILURE (relay bound to a different wall). Resolution: fresh pair
   redeploy on 2026-10-16 (§3).
-- **Test pairs (r2/r4) — VRF fulfiller stall (open).** These relays are correct (ERC-165 claimed,
+- **Test pairs (r2/r4) — VRF fulfiller stall (historical).** These relays are correct (ERC-165 claimed,
   `ccipReceive` verified by on-chain trace, two VRF requests committed on-chain), but the
-  requests are pending for many hours — an off-chain Chainlink fulfiller-selection issue, not
+  requests were pending for many hours — an off-chain Chainlink fulfiller-selection issue, not
   our plumbing. Evidence: sub `554014898…679128` `pendingRequestExists = true`, plus three probe
-  requests on sub `693592238…789700`; support-ticket text was prepared on 2026-10-16.
+  requests on sub `693592238…789700`; support-ticket text was prepared on 2026-10-16. The
+  production pair itself fulfilled within minutes on 2026-10-19 (see "Epoch 1 settled in
+  production" above), so the stall is treated as lane history, not an open issue on our pair.
 
 #### Audit status (honest)
 
@@ -328,7 +330,8 @@ on the winner's wallet):
    after that window a re-request spawns an **additional paid VRF request** for the same epoch
    (audit #4) — the first word wins and the extra one drains the subscription.
 2. **Wait for `relay.randomnessReady(1)` = true** — Chainlink's fulfiller lane does the work;
-   multi-hour stalls are observed (fulfiller selection, not our plumbing).
+   multi-hour stalls **were** observed on the test pairs (fulfiller selection, not our plumbing);
+   the production pair fulfilled in ~15 minutes on 2026-10-19.
 3. **`relay.deliver(1)` on Base** — a separate, permissionless transaction anyone can send
    (gas from the sender, the CCIP reply fee from the relay's own ETH balance). The settlement
    script sends it automatically once the word is ready; `deliver()` alone was missing from the
@@ -342,6 +345,23 @@ it via **CCIP Explorer** (`https://ccip.chain.link`): open the Base→Robinhood 
 — the wall rejects a duplicate word with `EpochAlreadySettled`. Do **not** `requestSettlement`
 again for a stuck-but-delivered epoch (audit #1: the relay's retry branch is a silent no-op
 then; only off-contract manual execution completes it).
+
+#### Epoch 1 settled in production (2026-10-19) — the first end-to-end run, all 4 steps + payout
+
+| Step | Evidence (full hash, block, chain) |
+| --- | --- |
+| 1. `requestSettlement(1)`, CCIP fee quoted 0.000045246852418097 ETH | tx `0x48acb5d25994c00a6fbd9aa42e3fab9e5091bfe28984a15e6df73790be1318c3`, block 92340439, Robinhood 4663 |
+| 2. VRF fulfilled; word recorded on the ownerless relay (`randomnessReady(1) = true`) | VRF sub `51444126…00047214776`, sub proof on-chain; word below |
+| 3. `relay.deliver(1)` on Base (permissionless, once) | tx `0xae51fa85889890b3f8a71e7588385d7b72f68404f524dc6dd0204daa78e02a18`, Base block 52798101; CCIP reply messageId `0xdc53ec33dcf320dc3014c622c65186624b1abfa1cc7b978dbe4c3e1a3a5feb2d` (not needed — the leg executed on its own ~24 min later) |
+| 4. `WinnerDrawn` on the wall | tx `0xe1adfc7478a3f265624e8968343cb7edeb172cddb59eec2e404636c91156d385`, block 92362088: winner `0x380fbF99A903253E14b9EB797807B4B92cd4b019`, prize 500 NOTES, stored word `10824310925582213203571677487811418395102277655736429366599786138850914746510` |
+| Payout (pull-based, `claimReward()` from the winner's wallet) | tx `0x3fd67e3fc76afdd8674141f6d6472aedb32c1e32278555dbb5a2f69a82a94b43`, block 92371327: `claimable` 500 → 0; winner's NOTES balance +exactly 500 NOTES |
+
+Honest scope: epoch 1 held exactly **1 ticket, from the deployer wallet**, so the winner was
+defined as the words chosen by deterministic construction, not by chance. What the run proves is
+the **end-to-end production path** — requestSettlement → CCIP → ownerless-relay VRF v2.5
+fulfillment → CCIP reply → `winnerIndex = word % 1 = 0` credit on the immutable wall — not
+lottery fairness. Sybil resistance / fairness across many tickets becomes measurable from
+epoch 2 onward (live now, ends 2026-10-22 04:28:50 UTC).
 
 ---
 
@@ -461,8 +481,12 @@ superseded `d063100` design remains in §6 as history.
 - CCIP lanes/routers are immutable per deployment; a stuck reply leg is finished via CCIP
   Explorer manual execution, not on-chain code (findings #1, #3).
 
-**Current settlement status at submission:** production epoch 1 holds 1 ticket (deployer wallet,
-tx `0xc6341f2e…09269b36`) worth a 500-NOTES pool; `settlementStatus(1) = None`; VRF sub
-`reqCount = 0`; no pending request. First production `requestSettlement` can only be sent after
-epoch 1 ends (**2026-10-19 04:28:50 UTC**).
+**Current settlement status (updated 2026-10-19, after the epoch-1 settlement):** epoch 1 is
+**Settled and fully paid out**: request tx `0x48acb5d2…18c3` (block 92340439) → VRF fulfilled →
+deliver tx `0xae51fa85…2a18` (Base block 52798101) → `WinnerDrawn` tx `0xe1adfc74…d385`
+(block 92362088, winner deployer wallet, 500 NOTES of the single-ticket pool) → claim tx
+`0x3fd67e3f…4b43` (block 92371327, `claimable` zeroed). Full full-hash chain in §6.
+Epoch 2 is live and ends **2026-10-22 04:28:50 UTC**. Honest note: epoch 1 had a single ticket
+from the deployer wallet, so the winner was predetermined — this run proves the end-to-end
+VRF → CCIP → wall path on production, not lottery fairness.
 

@@ -1,5 +1,7 @@
 NOTES To The World (nttw-blush.vercel.app): every sticky note is an ERC-721; prizes settle cross-chain via Chainlink VRF v2.5.
-A stamp costs 1000 NOTES (500 burn / 500 pool) and is a 3-day-epoch ticket. Anyone settles an ended epoch for the CCIP fee; the ownerless VrfCcipRelay (Base) requests a VRF word; anyone then calls deliver(epoch) to ship it; winner = word % ticketCount via claimReward().
-Custom: IMDRetroWall (Robinhood 4663); NOTES launched via the IMD Protocol (Uniswap V4).
-Honest: the first relay lacked ERC-165 so CCIP dropped its messages; redeployed 2026-10-16 with ERC-165 verified on-chain. Wall-to-relay CCIP proved live on mainnets; no WinnerDrawn yet - VRF fulfillment pending on Chainlink. Audited at a5c1af9 (2 med, 5 low, 2 info): all 9 acknowledged, not fixed in the deployed contracts; mitigations operational - never re-request once pending; recover via deliver/CCIP Explorer; never cancel the deployer-owned VRF sub.
+A stamp costs 1000 NOTES (500 burn / 500 pool) - a 3-day-epoch ticket. Anyone settles an ended epoch; the ownerless relay (Base) takes one VRF word; deliver(epoch) ships it back; winner = word % ticketCount.
+Custom wall (Robinhood 4663); NOTES launched via the IMD Protocol (Uniswap V4).
+Proof: epoch 1 settled end-to-end 2026-10-19 (requestSettlement -> VRF -> deliver -> WinnerDrawn -> 500 NOTES paid). Single deployer ticket => winner predetermined; proven is the live path, not lottery fairness.
+Honest: the first relay lacked ERC-165, so CCIP dropped its messages; redeployed, ERC-165 verified. Audited at a5c1af9 (2M/5L/2I), all acknowledged, not fixed; mitigations: never re-request while pending; deliver/CCIP Explorer recovery; never cancel the deployer VRF sub.
+Epoch 2 live, ends 2026-10-22 04:28:50 UTC.
 Repo: github.com/gimogo/NTTW - X: @NotestotheW

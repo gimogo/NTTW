@@ -81,6 +81,9 @@ async function main() {
     "function epochPrize(uint256) view returns (uint256)",
     "function settlementStatus(uint256) view returns (uint8)",
     "function requestSettlement(uint256) payable",
+    // errors (contracts/IMDRetroWall.sol:254-265) — without them parseError
+    // returns null on the fee-discovery revert and the run aborts.
+    "error InsufficientFee(uint256 required, uint256 provided)",
   ], rh);
   const relay = new ethers.Contract(relayAddr, [
     "event RandomnessRequested(uint256 indexed epoch, uint256 indexed requestId)",
@@ -197,7 +200,8 @@ async function main() {
     if (bal < fee + ethers.parseEther("0.00002")) {
       throw new Error(`Wallet gas+fee budget insufficient: has ${ethers.formatEther(bal)}, needs fee ${ethers.formatEther(fee)} + gas margin.`);
     }
-    const tx = await wall.requestSettlement(1n, { value: fee });
+    // connect() widens the ABI proxy typing; reinstate the wall's own signature.
+    const tx = await (wall.connect(wallet) as typeof wall).requestSettlement(1n, { value: fee });
     const rc = await tx.wait();
     requestBlock = rc!.blockNumber;
     console.log(`[step1] requestSettlement(1) ${tx.hash} status ${rc!.status} block ${requestBlock}`);
