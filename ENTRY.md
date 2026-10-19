@@ -12,7 +12,7 @@ How it works:
 - Epochs are genesis-based windows (3 days on the production wall redeployed 2026-10-16;
   IMDRetroWall.sol:134); max 5 tickets per address per epoch (MAX_STAMPS_PER_EPOCH, :137).
 - At epoch end, anyone calls requestSettlement(epoch) and pays the exact CCIP fee; the wall
-  forwards one integer (the epoch) to an ownerless VrfCcipRelay on Base, which requests one
+  forwards one integer (the epoch) to an immutable VrfCcipRelay on Base, which requests one
   Chainlink VRF v2.5 word. The word is NOT forwarded automatically: once the relay records it
   (randomnessReady(epoch) = true), anyone calls deliver(epoch) on Base (permissionless) to ship
   it back over CCIP; if the reply leg stalls, CCIP Explorer manual execution finishes it.
@@ -40,7 +40,7 @@ Verify it yourself:
 | **Live production stamp — the first ticket of epoch 1** (all tickets so far come from the deployer wallet) | Robinhood 4663 | https://robin.etherscan.io/tx/0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36 (block 89,837,366; ticket pool = 500 NOTES) |
 | Live app (points at the redeployed production wall) | Robinhood 4663 | https://nttw-blush.vercel.app/ |
 | **Epoch-1 settlement, step 1: `requestSettlement(1)` (CCIP fee quoted, paid once)** | Robinhood 4663 | https://robin.etherscan.io/tx/0x48acb5d25994c00a6fbd9aa42e3fab9e5091bfe28984a15e6df73790be1318c3 (block 92340439) |
-| **Epoch-1 settlement, step 2: VRF word fulfilled on the ownerless relay (`randomnessReady(1)`)** | Base 8453 | stored word `10824310925582213203571677487811418395102277655736429366599786138850914746510` |
+| **Epoch-1 settlement, step 2: VRF word fulfilled on the immutable relay (`randomnessReady(1)`)** | Base 8453 | stored word `10824310925582213203571677487811418395102277655736429366599786138850914746510` |
 | **Epoch-1 settlement, step 3: `deliver(1)` on Base (permissionless, once) + CCIP reply messageId** | Base 8453 | https://basescan.org/tx/0xae51fa85889890b3f8a71e7588385d7b72f68404f524dc6dd0204daa78e02a18 (block 52798101; messageId `0xdc53ec33dcf320dc3014c622c65186624b1abfa1cc7b978dbe4c3e1a3a5feb2d`) |
 | **Epoch-1 settlement, step 4: `WinnerDrawn` on the wall — first production prize** | Robinhood 4663 | https://robin.etherscan.io/tx/0xe1adfc7478a3f265624e8968343cb7edeb172cddb59eec2e404636c91156d385 (block 92362088; prize 500 NOTES) |
 | **Epoch-1 payout: `claimReward()` from the winner's wallet (pull-based)** | Robinhood 4663 | https://robin.etherscan.io/tx/0x3fd67e3fc76afdd8674141f6d6472aedb32c1e32278555dbb5a2f69a82a94b43 (block 92371327; `claimable` → 0) |
@@ -63,7 +63,7 @@ with a fresh pair from the current source; on the new pair, ERC-165 is claimed
 compiled artifact, and the wiring reads back both ways. The VRF fulfillment stall observed on
 the test pairs (r2/r4) is Chainlink's off-chain fulfiller selection, not our plumbing — kept
 here as history. On 2026-10-19 the production epoch 1 was settled end-to-end on the live pair:
-requestSettlement → CCIP → ownerless-relay VRF v2.5 fulfillment → `deliver(1)` → CCIP reply →
+requestSettlement → CCIP → immutable-relay VRF v2.5 fulfillment → `deliver(1)` → CCIP reply →
 WinnerDrawn, with the full tx chain in the table above, the 500-NOTES pool credited and
 `claimReward()` paid (settlementStatus(1) = Settled). Honest scope: epoch 1 had exactly one
 ticket, from the deployer wallet, so the winner was predetermined — what is proven is the

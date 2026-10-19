@@ -29,8 +29,8 @@ Live app: https://nttw-blush.vercel.app/ (mirrors ENTRY.md).
 | VRF sub (aktif) | `51441836222580451052993458818119349024779142164800689033215217746100047214776`; native 0.0008 ETH; reqCount 0; owner = wallet kita; consumer = relay (satu-satunya) | `getSubscription` coordinator `0xd5D517aB…` |
 | Relay ETH (Base) | 0.0005 ETH | `eth_getBalance` |
 | Key hash | 2 gwei `0x00b81b5a830cb0a4009fbd8904de511e28631e62ce5ad231373d3cdad373ccab` | `relay.KEY_HASH()`; cocok nilai deploy |
-| **Status VRF/settlement — epoch 1 SETTLED (dibaca live 2026-10-19)** | Epoch 1 selesai end-to-end di pasangan produksi: (1) `requestSettlement(1)` tx `0x48acb5d25994c00a6fbd9aa42e3fab9e5091bfe28984a15e6df73790be1318c3` (block 92340439, CCIP fee 0.000045246852418097 ETH); (2) VRF v2.5 fulfilled — word `10824310925582213203571677487811418395102277655736429366599786138850914746510` tercatat di relay ownerless, `randomnessReady(1)=true` (~15 menit; stall test-pair r2/r4 = sejarah, bukan pair ini); (3) `deliver(1)` di Base tx `0xae51fa85889890b3f8a71e7588385d7b72f68404f524dc6dd0204daa78e02a18` (block 52798101, sekali) — CCIP reply messageId `0xdc53ec33dcf320dc3014c622c65186624b1abfa1cc7b978dbe4c3e1a3a5feb2d`, leg jalan sendiri tanpa manual-execute; (4) `WinnerDrawn` tx `0xe1adfc7478a3f265624e8968343cb7edeb172cddb59eec2e404636c91156d385` (block 92362088) — winner `0x380fbF99A903253E14b9EB797807B4B92cd4b019`, prize 500 NOTES, `winnerIndex = word % 1 = 0`; (5) payout `claimReward()` tx `0x3fd67e3fc76afdd8674141f6d6472aedb32c1e32278555dbb5a2f69a82a94b43` (block 92371327): `claimable` 500→0, saldo NOTES +tepat 500.000000000000000000 | RPC read-only Robinhood 4663 + Base 8453 (receipt + `settlementStatus(1)=2`, `claimable`, `balanceOf`) | 
-| **Catatan jujur epoch 1** | Epoch 1 hanya punya 1 tiket (dari wallet deployer) → winner predetermined. Yang terbukti: jalur end-to-end requestSettlement → CCIP → VRF ownerless relay → CCIP back → wall pada mainnet produksi — BUKAN keadilan lottery. Keadilan lintas-tiket baru terukur mulai epoch 2 (live, berakhir 2026-10-22 04:28:50 UTC) | log settlement 2026-10-19 |
+| **Status VRF/settlement — epoch 1 SETTLED (dibaca live 2026-10-19)** | Epoch 1 selesai end-to-end di pasangan produksi: (1) `requestSettlement(1)` tx `0x48acb5d25994c00a6fbd9aa42e3fab9e5091bfe28984a15e6df73790be1318c3` (block 92340439, CCIP fee 0.000045246852418097 ETH); (2) VRF v2.5 fulfilled — word `10824310925582213203571677487811418395102277655736429366599786138850914746510` tercatat di relay immutable, `randomnessReady(1)=true` (~15 menit; stall test-pair r2/r4 = sejarah, bukan pair ini); (3) `deliver(1)` di Base tx `0xae51fa85889890b3f8a71e7588385d7b72f68404f524dc6dd0204daa78e02a18` (block 52798101, sekali) — CCIP reply messageId `0xdc53ec33dcf320dc3014c622c65186624b1abfa1cc7b978dbe4c3e1a3a5feb2d`, leg jalan sendiri tanpa manual-execute; (4) `WinnerDrawn` tx `0xe1adfc7478a3f265624e8968343cb7edeb172cddb59eec2e404636c91156d385` (block 92362088) — winner `0x380fbF99A903253E14b9EB797807B4B92cd4b019`, prize 500 NOTES, `winnerIndex = word % 1 = 0`; (5) payout `claimReward()` tx `0x3fd67e3fc76afdd8674141f6d6472aedb32c1e32278555dbb5a2f69a82a94b43` (block 92371327): `claimable` 500→0, saldo NOTES +tepat 500.000000000000000000 | RPC read-only Robinhood 4663 + Base 8453 (receipt + `settlementStatus(1)=2`, `claimable`, `balanceOf`) | 
+| **Catatan jujur epoch 1** | Epoch 1 hanya punya 1 tiket (dari wallet deployer) → winner predetermined. Yang terbukti: jalur end-to-end requestSettlement → CCIP → VRF di relay immutable → CCIP back → wall pada mainnet produksi — BUKAN keadilan lottery. Keadilan lintas-tiket baru terukur mulai epoch 2 (live, berakhir 2026-10-22 04:28:50 UTC) | log settlement 2026-10-19 |
 | **Status VRF/settlement pra-settlement (sejarah, dibaca 2026-10-16 ~07:10 UTC)** | epoch 1: 1 tiket (deployer), pool 500 NOTES, `settlementStatus(1)=None`; relay `randomnessReady(1)=false`, `delivered(1)=false`; VRF sub 0.0008 ETH `reqCount=0` consumer = relay saja; relay ETH 0.0005. `requestSettlement(1)` produksi baru BISA dikirim setelah epoch 1 berakhir **2026-10-19 04:28:50 UTC**; skrip `settle-prod.ts` mengirim SEKALI saja, lalu `deliver(1)` di Base saat word ready (tidak pernah re-request saat pending) | `/tmp/onchain-status.js` + `/tmp/settle-prod-dryrun.log` (SETTLE_DRY_RUN=1, tanpa transaksi) |
 | **Status verifikasi explorer (2026-10-16 07:13 UTC)** | Basescan masih menampilkan relay produksi `Contract: Unverified`; halaman RobinScan tidak terbaca mesin dari host ini — anggap kedua page belum diverifikasi sampai upload Standard-JSON selesai; file input `verification/*.json` sudah ter-commit dan terbukti byte-sama dengan bytecode live | read_url Basescan + `verification/` |
 | **Audit (pasangan produksi)** | Commit `a5c1af9fc13c8413b508b245a997fdfc2689fa81` diaudit 2026-10-16: **2 medium / 5 low / 2 info** — https://github.com/Identity-md/research/blob/main/jobs/44df6543-f9d6-4f44-9d69-40e0f7223b0c/files/AUDIT.md — 9 temuan semuanya *acknowledged, not fixed in the deployed contracts* dengan mitigasi operasional (lihat README §10); audit lama d063100 tetap sebagai riwayat | AUDIT.md |
@@ -52,7 +52,7 @@ immutable-nya).
 | Relay produksi (Base) | tx penciptaan `0x01d68c8bb8078aba83702a3496625f7420c2ddff65fcd9d7651b676a81469466` (Base block 52649007) | `eth_getTransactionReceipt` (Base) → `contractAddress = 0xbD4808f0…2110`, status 1, from = wallet kita — re-verified; Basescan "ContractCreator 0x380fbF99…" |
 | Relay: setelah deploy (Base) | funding tx `0xe5e4e60e16f5c124f0bc4b6ad54f53788bb35c8b0d18c94d68a7cfaa6824b562` (block 52649011) | Basescan wall-relay tx list |
 | NOTES deployer | **IMD**: token dibuat **internal** oleh factory launch `0x9C9D2FCB75c2C132c0ac0c42df3819a42347265e` di dalam tx launch `0x874397f3…` (RobinScan "Parent Tx / internal tx: From 0x9C9D2FCB → Contract Creation"); tx DITANDA oleh EOA IMD `0xcECc29B037f5064fcdf45a5c318f132ef76aa551` (RobinScan "ContractCreator") | RobinScan page NOTES (internal tx) + `eth_getTransactionByHash` (from 0xcECc29B0…, to 0x9C9D2F…) |
-| Implikasi Radar | Radar membayar prize ke **deployer kontrak yang di-entry**: entry harus WALL (deployer wallet kita) — bukan NOTES (deployer-nya IMD) |ация di atas + aturan form imdradar.site/hackathon |
+| Implikasi Radar | Radar membayar prize ke **deployer kontrak yang di-entry**: entry harus WALL (deployer wallet kita) — bukan NOTES (deployer-nya IMD) |bukti di atas + aturan form imdradar.site/hackathon |
 
 | Item | Nilai | Sumber |
 | --- | --- | --- |
@@ -120,31 +120,34 @@ Hook **bukan buatan kita**; itu launch-hook milik IMD. Jangan pernah menyebutnya
 - `TS_NODE_PROJECT=tsconfig.hardhat.json npx tsc -p tsconfig.hardhat.json --noEmit` → exit 0.
 - `npx tsc --noEmit` (frontend/config) → exit 0.
 
-## 6 · Live status (VRF→CCIP→WinnerDrawn) — persis sekarang
+## 6 · Live status (VRF→CCIP→WinnerDrawn) — 2026-10-19, dibaca balik on-chain
 
-- CCIP wall→relay: **terverifikasi live** di pasangan uji `0x309DF01E… ⇄ 0xcCEB1364…`: requestSettlement tx
-  `0x1752fa15d11007ad4bcf536ad19d1734783101454990566ff8edded56aaba163` (Robinhood block 89.603.093)
-  → CCIP SUCCESS (message `0xcf3402a98645…f3609cd15`) → on-chain trace menunjukkan ERC-165 probes +
-  `ccipReceive` di relay → `RandomnessRequested` (event tx `0x6d8db81286be…9885aab9`).
-- Proyeksi produksi wall `0xbD4808f0… ⇄ relay 0xbD4808f0…`: relay produksi sudah minta VRF
-  (2 gwei lane) dan menunggu. requestSettlement produksi belum ada di epoch ini; kita menulis "wall pair
-  belum rate-settlement sudah eksis" - jangan mengklaim.
-- VRF fulfillment masalah: **belum di-fulfill** oleh Chainlink (±2 jam). Uji isolasi (fresh sub, EOA,
-  ExtraArgsV1 bertag, kopling tiap lane, kloning request siap) menganggap kendala ada di seleksi
-  request-finegranular Chainlink; bukan di sub kita (data lengkap di README §6.result dan /tmp/settle6-monitor.log).
-- Victory: monitor berjalan di background memantau requestSettlement lama.
-- Epoch prize terakhir ter-claim apa pun tidak pernah ada belum (tak ada `WinnerDrawn` di mainnet) — jadi
-  jangan klaim jalur end-to-end `WinnerDrawn` mujuntak.
+Epoch 1 pasangan produksi aktif `0x9550E4F8…3EE3 ⇄ 0x887bbed7…6eaA` telah SETTLED end-to-end
+(settlementStatus(1) = Settled, dibaca ulang saat claim) dan penuh ter-klaim:
+
+- requestSettlement(1) tx `0x48acb5d25994c00a6fbd9aa42e3fab9e5091bfe28984a15e6df73790be1318c3` (Robinhood block 92.340.439, CCIP fee 0.000045246852418097 ETH);
+- VRF v2.5 ter-fulfill ≈15 menit — word `10824310925582213203571677487811418395102277655736429366599786138850914746510` tercatat di relay immutable (Base), `randomnessReady(1)=true`;
+- deliver(1) (sekali, permissionless) tx `0xae51fa85889890b3f8a71e7588385d7b72f68404f524dc6dd0204daa78e02a18` (Base block 52.798.101) — CCIP reply messageId `0xdc53ec33dcf320dc3014c622c65186624b1abfa1cc7b978dbe4c3e1a3a5feb2d`, leg jalan sendiri tanpa manual-execute;
+- WinnerDrawn tx `0xe1adfc7478a3f265624e8968343cb7edeb172cddb59eec2e404636c91156d385` (Robinhood block 92.362.088) — winner `0x380fbF99A903253E14b9EB797807B4B92cd4b019`, prize 500 NOTES, `winnerIndex = word % 1 = 0`;
+- Payout claimReward() tx `0x3fd67e3fc76afdd8674141f6d6472aedb32c1e32278555dbb5a2f69a82a94b43` (block 92.371.327) — `claimable` 500→0, saldo NOTES deployer +tepat 500.000000000000000000.
+
+Catatan jujur: epoch 1 hanya punya 1 tiket (deployer) → winner predetermined; yang terbukti
+adalah jalur produksi end-to-end requestSettlement → CCIP → VRF → deliver → WinnerDrawn →
+payout, bukan keadilan lottery. Rehearsal pasangan uji `0x309DF01E… ⇄ 0xcCEB1364…`
+(requestSettlement tx `0x1752fa15d11007ad4bcf536ad19d1734783101454990566ff8edded56aaba163`,
+Robinhood block 89.603.093 → CCIP SUCCESS → ERC-165 probes + `ccipReceive` di relay →
+`RandomnessRequested`) tetap sebagai sejarah jalur uji; stall VRF pasangan uji r2/r4 juga
+sejarah, bukan pasangan produksi ini. Epoch 2 live, berakhir 2026-10-22 04:28:50 UTC.
 
 ## 7 · Audit: peta 14 temuan (d063100) vs v3
 
 Dokumen sumber: github.com/Identity-md/research/blob/main/jobs/16c65a39-24f4-47d6-a9f5-2140c70791c6/files/AUDIT.md
 
-| # | Temuan | Status di v3 | Buktia |
+| # | Temuan | Status di v3 | Bukti |
 | --- | --- | --- | --- |
-| 1 | push-loop payout membahbaya stampNote jika satu transfer gagal (top-10 leaderboard) | FIXED (desain dihapus) | leaderboard dihapus; sekarang `claimable[winner] += prize` + `claimReward()` pull-based: `IMDRetroWall.sol:439-451` |
+| 1 | push-loop payout membahayakan stampNote jika satu transfer gagal (top-10 leaderboard) | FIXED (desain dihapus) | leaderboard dihapus; sekarang `claimable[winner] += prize` + `claimReward()` pull-based: `IMDRetroWall.sol:439-451` |
 | 2 | tokenURI data: URI tanpa encode ('#' memotong JSON) | FIXED | `data:application/json;base64,` + `Base64.encode` set `:566`, import Base64 `:9` |
-| 3 | settlement hanya di dalam stampNote berbayar (poolx p-s 409) | FIXED / redesigned | `requestSettlement(uint256 epoch)` payable siapa-pun `:369-399`; ccipReceive menulis `WinnerDrawn` `:417-442` |
+| 3 | settlement hanya bisa dipicu dari dalam stampNote berbayar | FIXED / redesigned | `requestSettlement(uint256 epoch)` payable siapa-pun `:369-399`; ccipReceive menulis `WinnerDrawn` `:417-442` |
 | 4 | getNotes panic offset+limit | FIXED | `end = limit > total - offset ? total : offset + limit;` `:502` |
 | 5 | sybil last-second ambil 100% pool (top-10 board) | FIXED (board dihapus) | tak ada lagi papan rank; hanya tiket uniform + VRF `:333-345,437` |
 | 6 | warna `0xRRGGBB` diterima | FIXED | `_isValidHexColor` tegas 7-byte `#RRGGBB` `:682-697` |
@@ -152,8 +155,8 @@ Dokumen sumber: github.com/Identity-md/research/blob/main/jobs/16c65a39-24f4-47d
 | 8 | Tidak ada validasi UTF-8 | FIXED | `_isValidUtf8` RFC 3629 `:699-751`, dipanggil `:334` |
 | 9 | OZ tak dideklarasi di package.json | FIXED | `package.json:31` `"@openzeppelin/contracts": "5.0.2"`; lockfile ada (OZ dipakai di deploy) |
 | 10 | Lazy rollover (epoch bergeser) | FIXED | waktu epoch didasarkan GENESIS `:184,462-465` |
-| 11 | NatSpec feesh 50 token (konst 500) | FIXED | NatSpec match: `:117-124` (rugositas: `:117 "1000 tokens"`, `:121 "500e18"`…) |
-| 12 | Token yang dikirim langsung ke wall acacha (tak ada sweep) | STILL OPEN/by design | grep `sweep|syncPool` = 0 fungsi; di README §5 |
+| 11 | NatSpec fee 50 token (konst 500) | FIXED | NatSpec match: `:117-124` (rugositas: `:117 "1000 tokens"`, `:121 "500e18"`…) |
+| 12 | Token yang dikirim langsung ke wall tidak dilacak (tak ada sweep) | STILL OPEN/by design | grep `sweep|syncPool` = 0 fungsi; di README §5 |
 | 13 | Test "reverts the whole stamp..." tak menguji jalur gagal | N/A | push-loop yang diuji sudah tidak ada; test terkait reward transfer tidak ada lagi (`grep RewardTransferFailed` di test = 0) |
 | 14 | Tidak ada cek decimals()==18 | FIXED | `InvalidTokenDecimals` di constructor `:284-285` |
 

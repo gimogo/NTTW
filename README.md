@@ -12,7 +12,8 @@ lives on **Base** (8453) and ships every epoch's winning word back over **Chainl
 - **Ticket transparency:** every ticket so far comes from the deployer wallet (`0x380fbF99…b019`) —
   the first production stamp tx is
   [`0xc6341f2e…09269b36`](https://robin.etherscan.io/tx/0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36)
-  (block 89837366); epoch 1 currently holds exactly 1 ticket worth a 500 NOTES pool.
+  (block 89837366); epoch 1 (settled 2026-10-19, §6) held exactly that 1 ticket — its 500 NOTES
+  pool was drawn and paid out; epoch 2 is live until 2026-10-22 04:28:50 UTC.
 
 - Every stamped note is a real on-chain `string` (≤280 bytes, validated UTF-8) — no IPFS.
 - Every stamp costs **1000 NOTES**: **500 burned** to `0x…dEaD`, **500 pooled** for that epoch.
@@ -24,7 +25,8 @@ lives on **Base** (8453) and ships every epoch's winning word back over **Chainl
 > 2026-10-16** because the first production relay lacked the ERC-165 claim the CCIP off-ramp
 > probes for, and could never request VRF (details in §3 and §6). The new pair is verified
 > on-chain: ERC-165 claimed, runtime bytecode equals the compiled artifact, wiring read back
-> both ways. Epochs are **3 days** on the production wall; epoch 1 ends 2026-10-19 04:28:50 UTC.
+> both ways. Epochs are **3 days** on the production wall; epoch 1 ended 2026-10-19 and is settled
+> end-to-end (§6); epoch 2 ends 2026-10-22 04:28:50 UTC.
 
 ---
 
@@ -32,7 +34,7 @@ lives on **Base** (8453) and ships every epoch's winning word back over **Chainl
 
 | Problem in typical on-chain lotteries | NTTW answer |
 | --- | --- |
-| Randomness from blockhash (miner-controllable) | Verifiable VRF v2.5 word, request made by an **ownerless relay**, not the game contract |
+| Randomness from blockhash (miner-controllable) | Verifiable VRF v2.5 word, request made by an **immutable relay**, not the game contract |
 | Off-chain files pretend to be on-chain | Notes are stored **in the ERC-721 itself**; the NFT *is* the note |
 | Admin keys everywhere | Admin surface is **one call, globally**: `setRelay()`, once. After that: no owner, no pause, no upgrades |
 | Prize logic duplicated across chains | No logic crosses the chain — only **one integer**: the raw `randomWord`. The wall derives the winner alone |
@@ -180,7 +182,9 @@ Basescan still shows the production relay **`Contract: Unverified`**; the RobinS
 machine-readable from this repo's tooling (treat it as unverified until confirmed). The
 Standard-JSON inputs are prepared and committed under `verification/` and are byte-for-byte
 the input of the deployed pair — upload them (wall → RobinScan, relay → Basescan) before
-submission so both pages read "Source Code Verified / Exact Match". Our own byte-level proof
+submission so both pages read "Source Code Verified / Exact Match". The verified bundle also
+includes `contracts/testnet/IMDRetroWallShortEpoch.sol`, which is source-verified but **not
+deployed** on any chain (§2). Our own byte-level proof
 (§3 evidence table) already equals the deployed bytecode.
 
 Funding at deploy (2026-10-16 pair): VRF subscription **0.0008 ETH** (native, sub id
@@ -351,14 +355,14 @@ then; only off-contract manual execution completes it).
 | Step | Evidence (full hash, block, chain) |
 | --- | --- |
 | 1. `requestSettlement(1)`, CCIP fee quoted 0.000045246852418097 ETH | tx `0x48acb5d25994c00a6fbd9aa42e3fab9e5091bfe28984a15e6df73790be1318c3`, block 92340439, Robinhood 4663 |
-| 2. VRF fulfilled; word recorded on the ownerless relay (`randomnessReady(1) = true`) | VRF sub `51444126…00047214776`, sub proof on-chain; word below |
+| 2. VRF fulfilled; word recorded on the immutable relay (`randomnessReady(1) = true`) | VRF sub `51444126…00047214776`, sub proof on-chain; word below |
 | 3. `relay.deliver(1)` on Base (permissionless, once) | tx `0xae51fa85889890b3f8a71e7588385d7b72f68404f524dc6dd0204daa78e02a18`, Base block 52798101; CCIP reply messageId `0xdc53ec33dcf320dc3014c622c65186624b1abfa1cc7b978dbe4c3e1a3a5feb2d` (not needed — the leg executed on its own ~24 min later) |
 | 4. `WinnerDrawn` on the wall | tx `0xe1adfc7478a3f265624e8968343cb7edeb172cddb59eec2e404636c91156d385`, block 92362088: winner `0x380fbF99A903253E14b9EB797807B4B92cd4b019`, prize 500 NOTES, stored word `10824310925582213203571677487811418395102277655736429366599786138850914746510` |
 | Payout (pull-based, `claimReward()` from the winner's wallet) | tx `0x3fd67e3fc76afdd8674141f6d6472aedb32c1e32278555dbb5a2f69a82a94b43`, block 92371327: `claimable` 500 → 0; winner's NOTES balance +exactly 500 NOTES |
 
 Honest scope: epoch 1 held exactly **1 ticket, from the deployer wallet**, so the winner was
 defined as the words chosen by deterministic construction, not by chance. What the run proves is
-the **end-to-end production path** — requestSettlement → CCIP → ownerless-relay VRF v2.5
+the **end-to-end production path** — requestSettlement → CCIP → immutable-relay VRF v2.5
 fulfillment → CCIP reply → `winnerIndex = word % 1 = 0` credit on the immutable wall — not
 lottery fairness. Sybil resistance / fairness across many tickets becomes measurable from
 epoch 2 onward (live now, ends 2026-10-22 04:28:50 UTC).
@@ -466,7 +470,7 @@ superseded `d063100` design remains in §6 as history.
 | 8 | `stampNote` works before `setRelay`, so on a fresh deployment the deployer could pick the randomness source while money is at stake (info) | Deployment hygiene only: `setRelay(0x887bbed7…6eaA)` was executed (one-shot) **before** any production stamping; anyone can read `relay()` before stamping. Accepted for the live pair. |
 | 9 | First-word-wins and `UnknownRequest` branches of `rawFulfillRandomWords` are not exercised by the hardhat suite (info) | Coverage gap documented; behavior verified by the auditors' scratch proofs (later word dropped). Test files intentionally unchanged in this submission. |
 
-**Trust assumptions (read before trusting "ownerless"):**
+**Trust assumptions (read before trusting "immutable"):**
 
 - The VRF subscription
   `51441836222580451052993458818119349024779142164800689033215217746100047214776`
