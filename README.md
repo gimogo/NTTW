@@ -9,6 +9,7 @@ lives on **Base** (8453) and ships every epoch's winning word back over **Chainl
 
 - **Live app:** [nttw-blush.vercel.app](https://nttw-blush.vercel.app/) — points at the
   redeployed production wall.
+- **Submitted on IMD Radar:** 2026-10-19 (the submitted About text is `ENTRY_RADAR.txt`).
 - **Ticket transparency:** every ticket so far comes from the deployer wallet (`0x380fbF99…b019`) —
   the first production stamp tx is
   [`0xc6341f2e…09269b36`](https://robin.etherscan.io/tx/0xc6341f2e928f2b6b315a3f2fa911a59b59e62726c40f5e6246f3c82109269b36)
