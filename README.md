@@ -495,3 +495,40 @@ Epoch 2 is live and ends **2026-10-22 04:28:50 UTC**. Honest note: epoch 1 had a
 from the deployer wallet, so the winner was predetermined — this run proves the end-to-end
 VRF → CCIP → wall path on production, not lottery fairness.
 
+---
+
+## 11 · How NTTW uses IMD (verifiable facts)
+
+What NTTW takes from the IMD ecosystem, with a source for every claim (`FACTS.md` §2/§3/§4/§7,
+the launch repo, RobinScan reads, and the two IMD audit reports):
+
+1. **NOTES was launched through the IMD Protocol.** Launch tx
+   [`0x874397f3…dc55f2`](https://robin.etherscan.io/tx/0x874397f3de80109a73ca8bae153efb7a9005cb73f8c271055f679b455fdc55f2)
+   (Robinhood block 89,350,492) minted 1,000,000,000 NOTES and initialized the Uniswap **V4**
+   NOTES/IMD pool. Per the launch page
+   ([github.com/identity-md-launches/launch-1866-notes](https://github.com/identity-md-launches/launch-1866-notes))
+   the split is **88% pool liquidity / 10% to 409 contributing agents / 2% to the requester**;
+   the on-chain readbacks corroborate it: 880,000,000 NOTES (≈88%) sit in the V4 PoolManager
+   `0x8366a39CC670B4001A1121B8F6A443A643e40951` and ≈99.8M NOTES (≈10%) in the agents' Merkle
+   distributor `0xd89c2f7745d28c9c5e5466781c5a14be1f4fe9f3` (code live on-chain, 4,145 bytes).
+2. **The pool hook is IMD's, not our code.** `PoolInitializationGuard`
+   `0x19Bec7C2E1b2aadAf67b259744751a9960d66000` (RobinScan: verified exact match, Sol 0.8.26)
+   implements only `beforeInitialize` and reverts with `NotFactoryInitialization` unless the IMD
+   launch factory initializes the pool — launch infrastructure we consume, never an NTTW contract.
+3. **Both audits were run by the IMD swarm.** Job
+   [16c65a39](https://github.com/Identity-md/research/blob/main/jobs/16c65a39-24f4-47d6-a9f5-2140c70791c6/files/AUDIT.md)
+   on commit `d063100` (the earlier top-10-leaderboard design, kept as history) and job
+   [44df6543](https://github.com/Identity-md/research/blob/main/jobs/44df6543-f9d6-4f44-9d69-40e0f7223b0c/files/AUDIT.md)
+   on commit `a5c1af9` (the current production pair; 2 medium, 5 low, 2 info — all findings
+   acknowledged with operational mitigations, README §10).
+4. **Every stamp moves IMD-launched supply.** The wall's payment token is NOTES, the IMD-launched
+   token above; each stamp pays 1000 NOTES of which 500 burn to `0x…dEaD` and 500 pool as the
+   epoch prize (`IMDRetroWall.sol:118,121,124,355-356`) — the fee sink and the prize pool are
+   both drawn from IMD-launched NOTES.
+5. **Our custom contracts call nothing of IMD after launch.** The contract sources contain no
+   reference to the IMD token, the launch factory, the PoolManager, the hook, the distributor, or
+   any IMD oracle/jobs (grep of `contracts/`: zero matches) — they touch only NOTES as a plain
+   ERC-20, Chainlink CCIP (immutable router/selector/relay), and Chainlink VRF v2.5 (immutable
+   coordinator/key hash/sub id). NTTW's novelty is the **cross-chain Chainlink VRF + CCIP winner
+   settlement**, not the token or the launch mechanics.
+

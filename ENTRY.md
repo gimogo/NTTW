@@ -87,5 +87,26 @@ holder and paid out via `claimReward()` — every step has a tx hash in the tabl
 run proves the cross-chain machinery end-to-end, while the winner identity was predetermined
 by the 1-ticket epoch. Epoch 2 is live and ends 2026-10-22 04:28:50 UTC.
 
+How NTTW uses IMD (verifiable facts; full sources and links in README §11):
+
+- NOTES was launched through the IMD Protocol (launch tx 0x874397f3…dc55f2, Robinhood block
+  89,350,492; launch repo github.com/identity-md-launches/launch-1866-notes): 1,000,000,000 NOTES
+  split per the launch page as 88% pool liquidity / 10% to 409 contributing agents (Merkle
+  distributor 0xd89c2f77…9f3) / 2% to the requester — corroborated by on-chain balanceOf readbacks
+  (880M NOTES in the PoolManager, ≈99.8M in the distributor).
+- The pool hook PoolInitializationGuard 0x19Bec7C2E1b2aadAf67b259744751a9960d66000 is IMD's
+  launch hook, not our code (verified exact match on RobinScan; only beforeInitialize,
+  factory-gated, no fee or swap/liquidity hooks).
+- Both audits were run by the IMD swarm: job 16c65a39 on commit d063100 (the earlier
+  top-10-leaderboard design, kept as history) and job 44df6543 on commit a5c1af9 (the current
+  production pair: 2 medium / 5 low / 2 info, all findings acknowledged).
+- Every stamp is paid in NOTES, an IMD-launched token: 500 burned to the dead address and 500
+  pooled per stamp (IMDRetroWall.sol:118,121,124,355-356) — the fee sink and the prize pool both
+  come from IMD-launched supply.
+- Our custom contracts call no IMD oracle or job: the contract sources contain zero references to
+  the IMD token, the launch factory, the PoolManager, the hook, or the distributor — they touch
+  only NOTES as a plain ERC-20, Chainlink CCIP, and Chainlink VRF v2.5, all pinned immutably at
+  deploy. The novelty is the Chainlink VRF + CCIP cross-chain winner settlement.
+
 Links: repo https://github.com/gimogo/NTTW — X https://x.com/NotestotheW
 (@NotestotheW) — Submitted on IMD Radar 2026-10-19.
